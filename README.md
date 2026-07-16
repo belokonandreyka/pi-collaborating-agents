@@ -190,7 +190,6 @@ Parameters:
 - `tasks` (array, optional) – Array of task objects for parallel-mode
 - `type` (string, optional) – Subagent type to use (e.g., "scout", "documenter", "reviewer")
 - `cwd` (string, optional) – Working directory for spawned subagents
-- `sessionControl` (boolean, optional) – Spawn with `--session-control` (default: true)
 
 Examples:
 

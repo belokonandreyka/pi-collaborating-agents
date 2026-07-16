@@ -144,7 +144,6 @@ const SubagentParams = Type.Object({
   task: Type.Optional(Type.String({ description: "Single-mode task prompt" })),
   tasks: Type.Optional(Type.Array(SubagentTaskItem, { description: "Parallel-mode tasks" })),
   cwd: Type.Optional(Type.String({ description: "Default working directory for spawned subagents" })),
-  sessionControl: Type.Optional(Type.Boolean({ description: "Spawn children with --session-control (default true)" })),
   type: Type.Optional(Type.String({ description: "Subagent type to use (e.g., 'scout', 'documenter', 'reviewer'). Uses default if not specified." })),
 });
 
@@ -1378,7 +1377,6 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
       task?: string;
       tasks?: Array<{ task: string; cwd?: string }>;
       cwd?: string;
-      sessionControl?: boolean;
       type?: string;
     },
     ctx: ExtensionContext,
@@ -1465,7 +1463,6 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
       };
     }
 
-    const enableSessionControl = params.sessionControl !== false;
     const includeLaunchBlock = options?.includeLaunchBlock ?? true;
 
     // Create runtime agent from type configuration
@@ -1502,7 +1499,6 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         index: 0,
         runId: batchRunId,
         defaultCwd: params.cwd,
-        enableSessionControl,
         recursionDepth: depthState.depth,
         parentAgentName: state.agentName,
         launchMode: config.subagentLaunchMode,
@@ -1594,7 +1590,6 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         index,
         runId: batchRunId,
         defaultCwd: params.cwd,
-        enableSessionControl,
         recursionDepth: depthState.depth,
         parentAgentName: state.agentName,
         launchDelayMs: launchStaggerMs * index,
@@ -1684,7 +1679,6 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     task?: string;
     tasks?: Array<{ task: string; cwd?: string }>;
     cwd?: string;
-    sessionControl?: boolean;
     type?: string;
   };
 

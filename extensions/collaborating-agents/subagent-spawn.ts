@@ -1565,7 +1565,6 @@ export async function runSpawnTask(
     index: number;
     runId: string;
     defaultCwd?: string;
-    enableSessionControl?: boolean;
     recursionDepth: number;
     parentAgentName?: string;
     launchDelayMs?: number;
@@ -1582,7 +1581,9 @@ export async function runSpawnTask(
   const childName = sanitizeAgentName(`${task.agent}-${runToken}-${generatedCallsign}`);
 
   const commonArgs: string[] = [];
-  if (options.enableSessionControl !== false) commonArgs.push("--session-control");
+  // --session-control is not a flag any released pi supports (checked
+  // @mariozechner 0.53-0.73 and @earendil-works 0.74-0.80.9); passing it makes
+  // every child exit with "Unknown option" before it starts.
 
   const model = agentDef.model;
   if (model) commonArgs.push("--models", model);

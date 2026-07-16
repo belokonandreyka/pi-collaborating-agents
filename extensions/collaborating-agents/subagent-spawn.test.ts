@@ -744,7 +744,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun1",
         recursionDepth: 0,
-        enableSessionControl: false,
       },
     );
 
@@ -800,7 +799,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun-extension-tools",
         recursionDepth: 0,
-        enableSessionControl: false,
       },
     );
 
@@ -839,7 +837,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun-process-metadata",
         recursionDepth: 0,
-        enableSessionControl: false,
         onSessionMetadata: (metadata) => {
           observedMetadata.push(metadata);
         },
@@ -889,7 +886,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun-process-message",
         recursionDepth: 0,
-        enableSessionControl: false,
       },
     );
 
@@ -926,7 +922,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun-process-assistant-error",
         recursionDepth: 0,
-        enableSessionControl: false,
       },
     );
 
@@ -965,7 +960,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun-process-assistant-error-stderr",
         recursionDepth: 0,
-        enableSessionControl: false,
       },
     );
 
@@ -1002,7 +996,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun-process-transient-assistant-error",
         recursionDepth: 0,
-        enableSessionControl: false,
       },
     );
 
@@ -1038,7 +1031,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun-process-metadata-failure",
         recursionDepth: 0,
-        enableSessionControl: false,
         onSessionMetadata: () => {
           throw new Error("metadata failed");
         },
@@ -1083,7 +1075,6 @@ describe("subagent spawn", () => {
         index: 0,
         runId: "testrun-process-registration",
         recursionDepth: 0,
-        enableSessionControl: false,
         onSessionMetadata: (metadata) => {
           observedMetadata.push(metadata);
         },
