@@ -377,6 +377,16 @@ Controls whether successfully completed `"cmux-pane"` subagents automatically cl
 
 This setting only affects `"cmux-pane"` launch mode. Failures or non-zero exits detected during the idle grace leave panes open so logs remain visible.
 
+#### `subagentProgressIntervalMs` (number, default: `30000`)
+
+Minimum gap, per child, between progress updates posted to the orchestrator while a subagent is still running. Set to `0` to disable progress updates entirely.
+
+Without this, the orchestrator learns nothing about a child until the child finishes: the pane shows live activity to the human, but the parent's context stays empty. Each update is one compact line naming the child's callsign, how many tool calls it has made, and which tool it is running now.
+
+Updates travel through the same delivery queue as completions, so they wait for the parent to be idle and never trigger a turn on their own — the orchestrator reads accumulated progress on its next turn rather than being interrupted. The interval is what keeps a fleet of children from flooding the parent's context; lower it for closer monitoring at the cost of tokens.
+
+This setting only affects `"cmux-pane"` launch mode, which is the only mode that watches a child session file while it runs.
+
 ### Environment variables
 
 #### `COLLABORATING_AGENTS_DIR`

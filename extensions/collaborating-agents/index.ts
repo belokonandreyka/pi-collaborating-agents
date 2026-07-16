@@ -55,6 +55,7 @@ import {
   type SpawnResult,
   type SpawnSessionMetadata,
   type SpawnTask,
+  type SubagentProgressCallback,
 } from "./subagent-spawn.js";
 import {
   buildSubagentCompletionMessagePayload,
@@ -1493,6 +1494,9 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         task: params.task!,
         cwd: params.cwd,
       };
+      // Refined to the child's readable callsign once it launches, so progress
+      // lines identify the agent rather than its type.
+      let progressName = typeConfig.name;
 
       const result = await runSpawnTask(ctx.cwd, taskToRun, runtimeAgent, {
         index: 0,
@@ -1505,6 +1509,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         closeCompletedCmuxPane: config.closeCompletedCmuxPanes,
         onLaunch: (launch) => {
           markSubagentRunLaunched(childRunIds[0]!, typeConfig.name, launch, runRecordWarnings);
+          progressName = launch.name || progressName;
           return options?.onLaunch
             ? options.onLaunch({
                 profile,
@@ -1517,6 +1522,11 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         onSessionMetadata: (metadata) => {
           markSubagentRunSessionMetadata(childRunIds[0]!, metadata, runRecordWarnings);
         },
+        onProgress: createSubagentProgressReporter(
+          () => progressName,
+          config.subagentProgressIntervalMs,
+          ctx,
+        ),
       });
       markSubagentRunFromRegistration(childRunIds[0]!, result.name, runRecordWarnings);
       markSubagentRunCompleted(childRunIds[0]!, result, runRecordWarnings);
@@ -1577,6 +1587,9 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
 
     const results = await mapWithConcurrencyLimit(resolvedTasks, concurrency, async (entry, index) => {
       const recordId = childRunIds[index]!;
+      // Refined to the child's readable callsign once it launches, so a fleet of
+      // same-type children stays distinguishable in progress lines.
+      let progressName = entry.def.name;
       const result = await runSpawnTask(ctx.cwd, entry.task, entry.def, {
         index,
         runId: batchRunId,
@@ -1589,6 +1602,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         closeCompletedCmuxPane: config.closeCompletedCmuxPanes,
         onLaunch: (launch) => {
           markSubagentRunLaunched(recordId, typeConfig.name, launch, runRecordWarnings);
+          progressName = launch.name || progressName;
           return options?.onLaunch
             ? options.onLaunch({
                 profile: entry.def.name,
@@ -1601,6 +1615,11 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         onSessionMetadata: (metadata) => {
           markSubagentRunSessionMetadata(recordId, metadata, runRecordWarnings);
         },
+        onProgress: createSubagentProgressReporter(
+          () => progressName,
+          config.subagentProgressIntervalMs,
+          ctx,
+        ),
       });
       markSubagentRunFromRegistration(recordId, result.name, runRecordWarnings);
       markSubagentRunCompleted(recordId, result, runRecordWarnings);
@@ -2020,6 +2039,38 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
       pendingSubagentCompletionUpdates.unshift(...retry);
       schedulePendingSubagentCompletionFlush(ctx);
     }
+  }
+
+  // Progress lands in the orchestrator's context through the same queue as
+  // completions: delivery waits for idle and never triggers a turn, so a busy
+  // parent is not interrupted. The throttle is what keeps a fleet of children
+  // from flooding the context — one compact line per child per interval.
+  function createSubagentProgressReporter(
+    resolveDisplayName: () => string,
+    intervalMs: number,
+    ctx?: ExtensionContext,
+  ): SubagentProgressCallback | undefined {
+    if (intervalMs <= 0) return undefined;
+
+    let lastPostedAt = 0;
+    return (progress) => {
+      const now = Date.now();
+      if (now - lastPostedAt < intervalMs) return;
+      lastPostedAt = now;
+
+      const displayName = resolveDisplayName();
+      const activity = progress.lastTool ? `, currently running '${progress.lastTool}'` : "";
+      queueSubagentCompletionPayload(
+        {
+          customType: "collab_focus_status",
+          content: `Subagent ${displayName} is working: ${progress.toolCount} tool call(s) so far${activity}.`,
+          display: true,
+          details: { mode: "subagent", progress: true, toolCount: progress.toolCount, lastTool: progress.lastTool },
+        },
+        resolveSubagentCompletionTargetSessionFile(ctx?.sessionManager.getSessionFile() ?? undefined),
+        ctx,
+      );
+    };
   }
 
   function sendSubagentStatusPayload(

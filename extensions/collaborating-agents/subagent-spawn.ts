@@ -67,6 +67,14 @@ export interface SpawnSessionMetadata {
 
 type SpawnSessionMetadataCallback = (metadata: SpawnSessionMetadata) => void | Promise<void>;
 
+/** Live activity of a running child, derived from its session file. */
+export interface SubagentProgress {
+  toolCount: number;
+  lastTool?: string;
+}
+
+export type SubagentProgressCallback = (progress: SubagentProgress) => void;
+
 export const DEFAULT_SUBAGENT_TOOLS = ["read", "write", "edit", "bash", "agent_message"];
 
 const LOCAL_COLLABORATING_AGENTS_EXTENSION = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
@@ -613,6 +621,14 @@ function extractAssistantText(content: unknown): string {
   return parts.join("\n").trim();
 }
 
+function extractToolCallNames(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((c): c is { type: string; name?: string } => typeof c === "object" && c !== null && "type" in c)
+    .filter((c) => c.type === "toolCall" && typeof c.name === "string")
+    .map((c) => c.name as string);
+}
+
 function formatAssistantError(message: Record<string, unknown>): string {
   const errorMessage = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "";
   const diagnosticMessage = Array.isArray(message.diagnostics)
@@ -929,6 +945,7 @@ function parseSessionMessageLine(line: string): {
   terminalAssistantMessage?: boolean;
   terminalAssistantText?: string;
   terminalError?: string;
+  toolNames?: string[];
 } {
   let event: unknown;
   try {
@@ -960,7 +977,10 @@ function parseSessionMessageLine(line: string): {
         : parsed.type === "message_end"
           ? "message_end"
           : undefined;
-  if (stopReason === "toolUse") return {};
+  // A toolUse message is not terminal, but it is the only record of what the
+  // child is actually doing right now. Surface the tool names for progress
+  // reporting instead of discarding the message.
+  if (stopReason === "toolUse") return { toolNames: extractToolCallNames(message.content) };
 
   const terminalAssistantText = extractAssistantText(message.content);
   if (stopReason === "error" || typeof message.errorMessage === "string") {
@@ -981,6 +1001,7 @@ function readSpawnSessionState(sessionFile: string): {
   sessionId?: string;
   terminalAssistantText?: string;
   terminalError?: string;
+  progress?: SubagentProgress;
 } {
   if (!fs.existsSync(sessionFile)) return {};
 
@@ -994,18 +1015,24 @@ function readSpawnSessionState(sessionFile: string): {
   let sessionId: string | undefined;
   let terminalAssistantText: string | undefined;
   let terminalError: string | undefined;
+  let toolCount = 0;
+  let lastTool: string | undefined;
 
   for (const line of content.split(/\r?\n/)) {
     if (!line.trim()) continue;
     const parsed = parseSessionMessageLine(line);
     if (parsed.sessionId) sessionId = parsed.sessionId;
+    if (parsed.toolNames?.length) {
+      toolCount += parsed.toolNames.length;
+      lastTool = parsed.toolNames[parsed.toolNames.length - 1];
+    }
     if (parsed.terminalAssistantMessage) {
       terminalAssistantText = parsed.terminalAssistantText;
       terminalError = parsed.terminalError;
     }
   }
 
-  return { sessionId, terminalAssistantText, terminalError };
+  return { sessionId, terminalAssistantText, terminalError, progress: { toolCount, lastTool } };
 }
 
 // A cmux-pane subagent session can emit multiple assistant messages before it is
@@ -1019,7 +1046,7 @@ async function waitForSettledSessionResult(args: {
   exitMarkerPath: string;
   timeoutMs: number;
   idleGraceMs?: number;
-  onUpdate?: (state: { sessionId?: string }) => void;
+  onUpdate?: (state: { sessionId?: string; progress?: SubagentProgress }) => void;
 }): Promise<{
   sessionId?: string;
   terminalAssistantText?: string;
@@ -1045,6 +1072,7 @@ async function waitForSettledSessionResult(args: {
   let sessionId: string | undefined;
   let terminalAssistantText: string | undefined;
   let terminalError: string | undefined;
+  let lastReportedToolCount = 0;
 
   while (Date.now() - startedAt < hardTimeoutMs && Date.now() < activityDeadlineAt) {
     const currentToken = readFileChangeToken(args.sessionFile);
@@ -1059,6 +1087,10 @@ async function waitForSettledSessionResult(args: {
       if (state.sessionId) {
         sessionId = state.sessionId;
         args.onUpdate?.({ sessionId });
+      }
+      if (state.progress && state.progress.toolCount > lastReportedToolCount) {
+        lastReportedToolCount = state.progress.toolCount;
+        args.onUpdate?.({ sessionId, progress: state.progress });
       }
       if (state.terminalAssistantText !== undefined || state.terminalError !== undefined) {
         terminalAssistantText = state.terminalAssistantText;
@@ -1542,6 +1574,7 @@ export async function runSpawnTask(
     cmuxResultTimeoutMs?: number;
     onLaunch?: (launch: SpawnResult) => void | Promise<void>;
     onSessionMetadata?: SpawnSessionMetadataCallback;
+    onProgress?: SubagentProgressCallback;
   },
 ): Promise<SpawnResult> {
   const generatedCallsign = reserveReadableCallsign(options.runId, options.index);
@@ -1743,6 +1776,7 @@ export async function runSpawnTask(
           result.sessionId = state.sessionId;
           sessionMetadata.notify({ sessionId: state.sessionId, sessionFile: result.sessionFile });
         }
+        if (state.progress) options.onProgress?.(state.progress);
       },
     });
     await sessionMetadata.flush();

@@ -7,6 +7,7 @@ const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
   messageHistoryLimit: 400,
   subagentLaunchMode: "process",
   closeCompletedCmuxPanes: true,
+  subagentProgressIntervalMs: 30_000,
 };
 
 function isSubagentLaunchMode(value: unknown): value is SubagentLaunchMode {
@@ -58,5 +59,9 @@ export function loadConfig(cwd: string): CollaboratingAgentsConfig {
       typeof merged.closeCompletedCmuxPanes === "boolean"
         ? merged.closeCompletedCmuxPanes
         : DEFAULT_CONFIG.closeCompletedCmuxPanes,
+    subagentProgressIntervalMs:
+      typeof merged.subagentProgressIntervalMs === "number" && merged.subagentProgressIntervalMs >= 0
+        ? merged.subagentProgressIntervalMs
+        : DEFAULT_CONFIG.subagentProgressIntervalMs,
   };
 }
