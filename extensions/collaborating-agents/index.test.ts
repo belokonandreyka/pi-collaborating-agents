@@ -1151,6 +1151,159 @@ describe("agent_message subagent sessions", () => {
 
     await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
   });
+
+  test("tail returns nextOffset, honors sinceOffset for delta reads, and resyncs stale offsets", () => {
+    const tempDir = makeTempDir("collab-index-tail-delta");
+    const stateDir = path.join(tempDir, "state");
+    const dirs = makeDirs(stateDir);
+    const sessionFile = path.join(tempDir, "delta-session.jsonl");
+    writeSessionJsonl(sessionFile, [
+      { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "first line" }] } },
+    ]);
+
+    expect(writeSubagentRunRecord(dirs, makeRunRecord({
+      recordId: "delta-run",
+      batchRunId: "delta-batch",
+      name: "worker-delta",
+      displayName: "Worker Delta",
+      status: "running",
+      sessionId: "delta-session",
+      sessionFile,
+      lastSeenAt: "2026-02-01T00:00:00.000Z",
+    }))).toBe(true);
+
+    const context = {
+      parentAgent: "Coordinator",
+      parentSessionId: "parent-session",
+      parentPid: 123,
+      now: "2026-02-01T00:00:01.000Z",
+    };
+
+    const first = handleAgentMessageTail(dirs, { runId: "delta-run" }, context);
+    expect(first.isError).toBeUndefined();
+    const firstOffset = (first.details as { nextOffset: number }).nextOffset;
+    expect(typeof firstOffset).toBe("number");
+    expect(firstOffset).toBe(fs.statSync(sessionFile).size);
+    expect(first.content[0]?.text).toContain("first line");
+    expect(first.content[0]?.text).toContain(`Next offset: ${firstOffset}`);
+
+    const emptyDelta = handleAgentMessageTail(dirs, { runId: "delta-run", sinceOffset: firstOffset }, context);
+    expect(emptyDelta.isError).toBeUndefined();
+    expect(emptyDelta.details).toMatchObject({
+      action: "tail",
+      mode: "full",
+      entries: [],
+      nextOffset: firstOffset,
+      sinceOffset: firstOffset,
+      resynced: false,
+    });
+    expect(emptyDelta.content[0]?.text).toContain(`No new session events since offset ${firstOffset}`);
+
+    fs.appendFileSync(
+      sessionFile,
+      `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "second line" }] } })}\n`,
+      "utf-8",
+    );
+    const secondOffset = fs.statSync(sessionFile).size;
+
+    const delta = handleAgentMessageTail(dirs, { runId: "delta-run", sinceOffset: firstOffset }, context);
+    expect(delta.isError).toBeUndefined();
+    expect(delta.details).toMatchObject({
+      action: "tail",
+      mode: "full",
+      entries: [{ kind: "assistant_text", text: "second line" }],
+      nextOffset: secondOffset,
+      sinceOffset: firstOffset,
+      resynced: false,
+    });
+    expect(delta.content[0]?.text).toContain("second line");
+    expect(delta.content[0]?.text).not.toContain("first line");
+
+    const stale = handleAgentMessageTail(dirs, { runId: "delta-run", sinceOffset: secondOffset + 5000 }, context);
+    expect(stale.isError).toBeUndefined();
+    expect(stale.details).toMatchObject({
+      action: "tail",
+      mode: "full",
+      resynced: true,
+      nextOffset: secondOffset,
+    });
+    expect(stale.content[0]?.text).toContain("sinceOffset was stale");
+  });
+
+  test("tail mode:\"status\" returns run status and the final report without reading the transcript", () => {
+    const tempDir = makeTempDir("collab-index-tail-status");
+    const stateDir = path.join(tempDir, "state");
+    const dirs = makeDirs(stateDir);
+    const sessionFile = path.join(tempDir, "status-session.jsonl");
+    writeSessionJsonl(sessionFile, [
+      { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "transcript body that must not leak" }] } },
+    ]);
+
+    expect(writeSubagentRunRecord(dirs, makeRunRecord({
+      recordId: "status-running-run",
+      batchRunId: "status-batch-a",
+      name: "worker-status-running",
+      displayName: "Worker Status Running",
+      status: "running",
+      sessionId: "status-running-session",
+      sessionFile,
+      lastSeenAt: "2026-03-01T00:00:00.000Z",
+    }))).toBe(true);
+
+    expect(writeSubagentRunRecord(dirs, makeRunRecord({
+      recordId: "status-done-run",
+      batchRunId: "status-batch-b",
+      name: "worker-status-done",
+      displayName: "Worker Status Done",
+      status: "completed",
+      sessionId: "status-done-session",
+      sessionFile,
+      completedAt: "2026-03-01T00:00:05.000Z",
+      lastSeenAt: "2026-03-01T00:00:05.000Z",
+      exitCode: 0,
+      outputPreview: "## Summary\nDid the thing.\n## Files Changed\n- a.ts",
+      warnings: ["noticed a minor race"],
+    }))).toBe(true);
+
+    const context = {
+      parentAgent: "Coordinator",
+      parentSessionId: "parent-session",
+      parentPid: 123,
+      now: "2026-03-01T00:00:06.000Z",
+    };
+
+    const running = handleAgentMessageTail(dirs, { runId: "status-running-run", mode: "status" }, context);
+    expect(running.isError).toBeUndefined();
+    expect(running.details).toMatchObject({
+      action: "tail",
+      mode: "status",
+      status: "running",
+      finished: false,
+      finalReport: undefined,
+    });
+    const runningText = running.content[0]?.text ?? "";
+    expect(runningText).toContain("Status: running");
+    expect(runningText).not.toContain("transcript body that must not leak");
+    expect((running.details as Record<string, unknown>).entries).toBeUndefined();
+
+    const done = handleAgentMessageTail(dirs, { runId: "status-done-run", mode: "status" }, context);
+    expect(done.isError).toBeUndefined();
+    expect(done.details).toMatchObject({
+      action: "tail",
+      mode: "status",
+      status: "completed",
+      finished: true,
+      exitCode: 0,
+      finalReport: "## Summary\nDid the thing.\n## Files Changed\n- a.ts",
+      warnings: ["noticed a minor race"],
+    });
+    const doneText = done.content[0]?.text ?? "";
+    expect(doneText).toContain("Status: completed");
+    expect(doneText).toContain("Final report:");
+    expect(doneText).toContain("Did the thing.");
+    expect(doneText).toContain("Warnings: noticed a minor race");
+    expect(doneText).not.toContain("transcript body that must not leak");
+  });
 });
 
 describe("subagent launch identity", () => {

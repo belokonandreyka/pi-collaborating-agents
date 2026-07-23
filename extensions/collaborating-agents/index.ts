@@ -71,7 +71,7 @@ import {
   formatSubagentType,
   getDefaultSubagentType,
 } from "./subagent-types.js";
-import { formatSessionTail, readSessionTail } from "./session-tail.js";
+import { formatSessionTail, readSessionTail, TAIL_HARD_CAP_BYTES } from "./session-tail.js";
 
 const STATUS_KEY = "collab";
 const WATCH_DEBOUNCE_MS = 40;
@@ -115,6 +115,8 @@ const AGENT_MESSAGE_ACTIONS = [
   "release",
 ] as const;
 
+const AGENT_MESSAGE_TAIL_MODES = ["full", "status"] as const;
+
 const AgentMessageParams = Type.Object({
   action: StringEnum(AGENT_MESSAGE_ACTIONS, {
     description: "Action: status | list | sessions | session | tail | send | broadcast | feed | thread | reserve | release",
@@ -131,6 +133,12 @@ const AgentMessageParams = Type.Object({
   limit: Type.Optional(Type.Number({ description: "Max messages, subagent runs, or tail entries to return; default 20" })),
   includeCompleted: Type.Optional(Type.Boolean({ description: "For sessions, include completed/failed subagent runs; defaults to true. Set false for active runs only" })),
   raw: Type.Optional(Type.Boolean({ description: "For tail, include structured parsed session entries in details" })),
+  sinceOffset: Type.Optional(Type.Number({
+    description: "For tail: byte offset returned by a previous call's nextOffset. Reads only new content since that offset (HTTP Range / Kafka-consumer semantics). Stale/out-of-range offsets transparently resync. Payload is always clamped to ~3 KB.",
+  })),
+  mode: Type.Optional(StringEnum(AGENT_MESSAGE_TAIL_MODES, {
+    description: "For tail: 'full' (default) returns the transcript tail; 'status' returns only run status and the final report when finished, with no raw transcript. Cheap for polling.",
+  })),
   paths: Type.Optional(Type.Array(Type.String(), { description: "Reservation path patterns (reserve/release)" })),
   reason: Type.Optional(Type.String({ description: "Optional reservation reason (reserve)" })),
 });
@@ -162,6 +170,8 @@ interface AgentMessageSubagentRunParams {
   limit?: number;
   includeCompleted?: boolean;
   raw?: boolean;
+  sinceOffset?: number;
+  mode?: "full" | "status";
 }
 
 interface AgentMessageSubagentRunContext extends SubagentRunResolutionContext {
@@ -643,6 +653,57 @@ function validateSessionFilePath(sessionFile: string): { ok: true } | { ok: fals
   return { ok: true };
 }
 
+function formatSubagentStatusOnly(record: SubagentRunListRecord): string {
+  const stale = record.isStale ? " [stale]" : "";
+  const lines = [
+    `Subagent status ${record.recordId} (${formatRunName(record)})`,
+    `Status: ${record.status}${stale}`,
+  ];
+
+  if (record.completedAt) lines.push(`Completed: ${record.completedAt}`);
+  if (typeof record.exitCode === "number") lines.push(`Exit code: ${record.exitCode}`);
+
+  if (record.status === "completed" || record.status === "failed") {
+    lines.push("", "Final report:", record.outputPreview?.trim() || "(no final output captured)");
+    if (record.warnings?.length) {
+      lines.push("", `Warnings: ${record.warnings.join("; ")}`);
+    }
+  } else {
+    lines.push("(run is still active; poll again with mode:\"status\" or switch to mode:\"full\" for the transcript delta)");
+  }
+
+  return lines.join("\n");
+}
+
+function handleAgentMessageTailStatus(
+  record: SubagentRunListRecord,
+  requestedSelector: string,
+  params: AgentMessageSubagentRunParams,
+  sessionFile: string | undefined,
+  sessionFileResolved: boolean,
+): AgentMessageToolResponse {
+  const finished = record.status === "completed" || record.status === "failed";
+  return {
+    content: [{ type: "text", text: formatSubagentStatusOnly(record) }],
+    details: {
+      action: "tail",
+      mode: "status",
+      requestedSelector,
+      requestedRunId: params.runId,
+      requestedTo: params.to,
+      record,
+      sessionFile,
+      sessionFileResolved,
+      status: record.status,
+      finished,
+      completedAt: record.completedAt,
+      exitCode: record.exitCode,
+      warnings: record.warnings,
+      finalReport: finished ? record.outputPreview : undefined,
+    },
+  };
+}
+
 export function handleAgentMessageTail(
   dirs: Dirs,
   params: AgentMessageSubagentRunParams,
@@ -677,6 +738,14 @@ export function handleAgentMessageTail(
   const session = resolveTailSessionFile(dirs, resolved.record, context);
   const record = session.record;
   const sessionFile = session.sessionFile;
+
+  // Status-first mode: no transcript, no file read. Useful for cheap polling
+  // once the coordinator only cares about "is it done?" plus the structured
+  // final report the run record already carries.
+  if (params.mode === "status") {
+    return handleAgentMessageTailStatus(record, requestedSelector, params, sessionFile, session.resolved);
+  }
+
   if (!sessionFile) {
     const reason = record.sessionFileUnavailableReason ?? "No session file is available for this subagent run yet.";
     return tailError({
@@ -701,9 +770,14 @@ export function handleAgentMessageTail(
   }
 
   const limit = normalizeSubagentSessionLimit(params.limit);
+  const sinceOffset = params.sinceOffset;
   let tail;
   try {
-    tail = readSessionTail(sessionFile, { maxLines: limit });
+    tail = readSessionTail(sessionFile, {
+      maxLines: limit,
+      maxBytes: TAIL_HARD_CAP_BYTES,
+      ...(typeof sinceOffset === "number" ? { sinceOffset } : {}),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return tailError({
@@ -723,6 +797,12 @@ export function handleAgentMessageTail(
     tail.truncatedLineCount > 0
       ? `Tail limit omitted ${tail.truncatedLineCount} earlier line${tail.truncatedLineCount === 1 ? "" : "s"}.`
       : undefined,
+    tail.resynced
+      ? `sinceOffset was stale (file truncated or replaced); resynced from end. Use nextOffset=${tail.nextOffset} on the next call.`
+      : undefined,
+    typeof sinceOffset === "number" && tail.entries.length === 0 && !tail.resynced
+      ? `No new session events since offset ${sinceOffset}.`
+      : undefined,
     params.raw === true ? "Structured entries are available in details." : undefined,
   ].filter((line): line is string => typeof line === "string");
   return {
@@ -732,6 +812,7 @@ export function handleAgentMessageTail(
         text: [
           `Subagent tail ${record.recordId} (${formatRunName(record)})`,
           `Session file: ${sessionFile}`,
+          `Next offset: ${tail.nextOffset}`,
           "",
           formatted || "(no parsed session events)",
           ...notes,
@@ -740,6 +821,7 @@ export function handleAgentMessageTail(
     ],
     details: {
       action: "tail",
+      mode: "full",
       requestedSelector,
       requestedRunId: params.runId,
       requestedTo: params.to,
@@ -754,6 +836,9 @@ export function handleAgentMessageTail(
       bytesRead: tail.bytesRead,
       truncatedStart: tail.truncatedStart,
       truncatedLineCount: tail.truncatedLineCount,
+      nextOffset: tail.nextOffset,
+      sinceOffset: typeof sinceOffset === "number" ? sinceOffset : undefined,
+      resynced: tail.resynced,
     },
   };
 }
@@ -2337,7 +2422,7 @@ Actions:
 - list: List active agents
 - sessions: List scoped subagent run/session records (completed/failed included by default; pass includeCompleted: false for active only)
 - session: Resolve one subagent run/session record
-- tail: Read a concise transcript tail for one subagent run/session
+- tail: Read a concise transcript tail for one subagent run/session (delta-friendly: pass sinceOffset from a previous nextOffset to receive only new bytes; payload always clamped to ~3 KB). Pass mode:"status" for a cheap status-only response (no transcript) with the final report once the run finishes.
 - send: Send direct message to one active agent (set urgent: true to interrupt immediately)
 - broadcast: Send message to all active peers (set urgent: true to interrupt immediately)
 - feed: Read recent global messages
@@ -2433,7 +2518,7 @@ Subagent run selectors for session/tail: child run id/recordId, display name, ca
       }
 
       if (action === "tail") {
-        return handleAgentMessageTail(dirs, params, {
+        return handleAgentMessageTail(dirs, params as AgentMessageSubagentRunParams, {
           parentAgent: state.agentName,
           parentSessionId: ctx.sessionManager.getSessionId(),
           parentPid: process.pid,
