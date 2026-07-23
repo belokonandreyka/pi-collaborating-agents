@@ -173,6 +173,27 @@ Selectors accepted by `session` and `tail`:
 
 `sessions` lists active, completed, and failed records for the current coordinator by default. Pass `includeCompleted: false` to show only launching/running runs. `session` returns run metadata, session id, session file status, launch mode, cwd, and task preview. `tail` reads and formats the resolved session JSONL tail; it rejects raw file paths so agents do not bypass selector scoping.
 
+#### Delta `tail`, hard 3 KB cap, and status-first mode
+
+`tail` responses include a `nextOffset` — the byte offset the reader is caught up to in the underlying session JSONL. Pass it back as `sinceOffset` on the next call to receive only new bytes (HTTP-Range / Kafka-consumer semantics; no server cursor):
+
+```ts
+const first = agent_message({ action: "tail", runId: "run-id" });
+const delta = agent_message({ action: "tail", runId: "run-id", sinceOffset: first.details.nextOffset });
+```
+
+Stale, out-of-range, or negative `sinceOffset` values transparently resync to a tail-from-end read and return a fresh `nextOffset` plus `resynced: true`; one call restores the stream.
+
+Every `tail` payload is clamped to ~3 KB (`TAIL_HARD_CAP_BYTES`) regardless of any caller-requested size. This applies to both tail-from-end and delta reads; oversized responses drop the earliest bytes (`truncatedStart: true`).
+
+For cheap polling that does not need the transcript, pass `mode: "status"`:
+
+```ts
+agent_message({ action: "tail", runId: "run-id", mode: "status" })
+```
+
+Returns only the run status plus, when the run is finished, the structured final report already captured in the run registry (`outputPreview`, `exitCode`, `completedAt`, `warnings`) — no session file read.
+
 Process-mode subagents are launched as background `pi` child processes without a deterministic `--session` file. The extension records the session id from child output and attaches a session file only after child self-registration or fallback discovery by session id. Until then, tailing can report: `Process-mode session file unavailable until child registration or fallback discovery provides one.` In `cmux-pane` mode, the extension creates an explicit session file under `~/.pi/agent/sessions/collaborating-agents-subagents/` and tails that file after it appears.
 
 ### The `subagent` Tool

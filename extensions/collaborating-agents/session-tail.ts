@@ -4,6 +4,12 @@ const DEFAULT_MAX_BYTES = 64 * 1024;
 const DEFAULT_MAX_LINES = 200;
 const DEFAULT_TEXT_LIMIT = 2000;
 
+// Poll-friendly safety net: coordinators poll `tail` on every turn, so the
+// per-call payload has to stay small enough that duplicated / overlapping
+// context does not dominate the coordinator's token budget. 3 KB fits a few
+// hundred tokens; anything larger should come through delta reads instead.
+export const TAIL_HARD_CAP_BYTES = 3072;
+
 export type SessionTailEntry =
   | {
       kind: "session";
@@ -50,6 +56,11 @@ export interface SessionTailParseOptions {
 export interface SessionTailReadOptions extends SessionTailParseOptions {
   maxBytes?: number;
   maxLines?: number;
+  // Byte offset into the session JSONL from which to read (HTTP Range /
+  // Kafka-offset semantics). Undefined means "tail from end". Stale or
+  // out-of-range values transparently resync to a tail-from-end read; callers
+  // should always pass the returned `nextOffset` on the next poll.
+  sinceOffset?: number;
 }
 
 export interface SessionTailReadResult {
@@ -58,6 +69,12 @@ export interface SessionTailReadResult {
   bytesRead: number;
   truncatedStart: boolean;
   truncatedLineCount: number;
+  // File size after this read; the caller passes this back as `sinceOffset`
+  // on the next poll to receive only new bytes.
+  nextOffset: number;
+  // True when the requested `sinceOffset` was invalid / out-of-range and the
+  // read fell back to a tail-from-end resync.
+  resynced: boolean;
 }
 
 export interface SessionTailFormatOptions {
@@ -242,24 +259,69 @@ export function parseSessionJsonlLine(
   return { entries: parseMessageEvent(event, options), malformed: false };
 }
 
+function isValidSinceOffset(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && Number.isInteger(value);
+}
+
 export function readSessionTail(filePath: string, options: SessionTailReadOptions = {}): SessionTailReadResult {
-  const maxBytes = Math.max(1, Math.floor(options.maxBytes ?? DEFAULT_MAX_BYTES));
+  const requestedMax = Math.max(1, Math.floor(options.maxBytes ?? DEFAULT_MAX_BYTES));
+  const maxBytes = Math.min(requestedMax, TAIL_HARD_CAP_BYTES);
   const maxLines = Math.max(1, Math.floor(options.maxLines ?? DEFAULT_MAX_LINES));
   const stats = fs.statSync(filePath);
-  const start = Math.max(0, stats.size - maxBytes);
+
+  const rawSince = options.sinceOffset;
+  const sinceProvided = typeof rawSince === "number";
+  const sinceValid = isValidSinceOffset(rawSince) && rawSince <= stats.size;
+  const resynced = sinceProvided && !sinceValid;
+
+  // Empty-delta fast path: caller is already caught up.
+  if (sinceValid && rawSince === stats.size) {
+    return {
+      entries: [],
+      malformedLineCount: 0,
+      bytesRead: 0,
+      truncatedStart: false,
+      truncatedLineCount: 0,
+      nextOffset: stats.size,
+      resynced: false,
+    };
+  }
+
+  const deltaBase = sinceValid ? rawSince : Math.max(0, stats.size - maxBytes);
+  // Hard cap still bounds delta reads: even if the caller has a valid offset,
+  // we refuse to return more than TAIL_HARD_CAP_BYTES in a single call. The
+  // dropped middle is reported via `truncatedStart` so the caller knows to
+  // poll more frequently.
+  const start = Math.max(deltaBase, stats.size - maxBytes);
   const length = stats.size - start;
   const buffer = Buffer.alloc(length);
 
   const fd = fs.openSync(filePath, "r");
+  let previousByte: number | undefined;
   try {
     fs.readSync(fd, buffer, 0, length, start);
+    // Peek at the byte just before `start` so we can distinguish "start lands
+    // mid-line" from "start lands right after a newline". Only the former
+    // needs partial-line stripping; a delta read that resumes exactly at a
+    // line boundary must keep its first line intact.
+    if (start > 0) {
+      const peek = Buffer.alloc(1);
+      fs.readSync(fd, peek, 0, 1, start - 1);
+      previousByte = peek[0];
+    }
   } finally {
     fs.closeSync(fd);
   }
 
   let content = buffer.toString("utf-8");
-  const truncatedStart = start > 0;
-  if (truncatedStart) {
+  const startsMidLine = start > 0 && previousByte !== 0x0a; // 0x0a = '\n'
+  // "Truncated" means we actually dropped content the caller would otherwise
+  // have received: either we sliced a partial JSONL line off the front, or
+  // (for delta reads) the hard cap forced `start` past the requested
+  // `sinceOffset`. A clean line-boundary resume returns truncatedStart=false.
+  const requestedStart = sinceValid ? rawSince : 0;
+  const truncatedStart = startsMidLine || start > requestedStart;
+  if (startsMidLine) {
     const firstNewline = content.indexOf("\n");
     content = firstNewline >= 0 ? content.slice(firstNewline + 1) : "";
   }
@@ -279,7 +341,15 @@ export function readSessionTail(filePath: string, options: SessionTailReadOption
     entries.push(...parsed.entries);
   }
 
-  return { entries, malformedLineCount, bytesRead: length, truncatedStart, truncatedLineCount };
+  return {
+    entries,
+    malformedLineCount,
+    bytesRead: length,
+    truncatedStart,
+    truncatedLineCount,
+    nextOffset: stats.size,
+    resynced,
+  };
 }
 
 function entryPrefix(timestamp: string | undefined): string {

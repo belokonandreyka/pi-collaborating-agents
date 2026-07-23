@@ -25,7 +25,7 @@ Actions:
 - `list` — active agents
 - `sessions` — scoped subagent run/session records; completed/failed included by default, use `includeCompleted: false` for active only
 - `session` — resolve one subagent run/session record
-- `tail` — read a concise transcript tail for one subagent run/session
+- `tail` — read a concise transcript tail for one subagent run/session (delta-friendly via `sinceOffset` / `nextOffset`; hard 3 KB payload cap; `mode: "status"` for a cheap status-only response)
 - `send` — direct message to one peer (`to`, `message`, optional `replyTo`, optional `urgent`)
 - `broadcast` — message all peers (`message`, optional `urgent`)
 - `feed` — recent global message log (`limit`, default 20, max 400)
@@ -85,6 +85,30 @@ Supported selectors for `session` and `tail`:
 - `latest`: newest subagent run for the current coordinator
 
 `sessions` lists active, completed, and failed records for the current coordinator by default. Use `includeCompleted: false` to show only launching/running child runs. `tail` accepts selectors only, not raw file paths.
+
+#### Delta tail (`sinceOffset` / `nextOffset`)
+
+Every `tail` response returns `nextOffset` — the byte offset the reader is caught up to in the underlying session JSONL. Pass it back as `sinceOffset` on the next poll to receive only new bytes; the position lives entirely on the caller side, HTTP-Range / Kafka-consumer style, so there is no server cursor to reset.
+
+```ts
+const first = agent_message({ action: "tail", runId: "run-id" });
+// ... later, only the new content:
+const delta = agent_message({ action: "tail", runId: "run-id", sinceOffset: first.details.nextOffset });
+```
+
+If `sinceOffset` is stale (file truncated, replaced, or larger than the current size), the extension transparently resyncs to a tail-from-end read and returns a fresh `nextOffset` plus a `resynced: true` flag in `details`; one call restores the stream. A `sinceOffset` equal to the current file size returns an empty entry list.
+
+#### Hard 3 KB payload cap
+
+Every `tail` payload is clamped to ~3 KB (`TAIL_HARD_CAP_BYTES`) regardless of any caller-requested size. This applies to both tail-from-end and delta reads: a poll that would otherwise return more than 3 KB is truncated from the start (with `truncatedStart: true` in `details`), and the caller should poll more frequently or switch to `mode: "status"`.
+
+#### Status-first mode (`mode: "status"`)
+
+```ts
+agent_message({ action: "tail", runId: "run-id", mode: "status" })
+```
+
+Returns no transcript — just `status` (`launching` / `running` / `completed` / `failed`) and, once the run is finished, the structured final report already captured in the run registry (`outputPreview`, `exitCode`, `completedAt`, `warnings`). Use this as the cheap heartbeat when the coordinator only cares whether the child is done and what it produced; switch to the default `mode: "full"` (with `sinceOffset`) only when you actually need transcript deltas.
 
 Process mode launches a background `pi` child without a deterministic `--session` file. The extension records the session id from child output and attaches a session file after child self-registration or fallback discovery by session id. Until that happens, tailing may report: `Process-mode session file unavailable until child registration or fallback discovery provides one.` In `cmux-pane` mode, the extension creates an explicit session file under `~/.pi/agent/sessions/collaborating-agents-subagents/`.
 

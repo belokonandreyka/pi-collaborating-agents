@@ -7,6 +7,7 @@ import {
   formatSessionTail,
   parseSessionJsonlLine,
   readSessionTail,
+  TAIL_HARD_CAP_BYTES,
 } from "./session-tail.ts";
 
 function tempFile(name: string): string {
@@ -231,3 +232,139 @@ describe("session tail reading and formatting", () => {
     expect(output).toBe("assistant: work in progress");
   });
 });
+
+describe("session tail delta reads and hard cap", () => {
+  function writeJsonlLines(file: string, lines: string[]): void {
+    fs.writeFileSync(file, `${lines.join("\n")}\n`, "utf-8");
+  }
+
+  function textLine(text: string): string {
+    return JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    });
+  }
+
+  test("first read returns nextOffset equal to file size and can round-trip to empty delta", () => {
+    const file = tempFile("delta-round-trip.jsonl");
+    writeJsonlLines(file, [textLine("one"), textLine("two")]);
+    const size = fs.statSync(file).size;
+
+    const first = readSessionTail(file);
+    expect(first.nextOffset).toBe(size);
+    expect(first.resynced).toBe(false);
+    expect(first.entries.map((entry) => (entry.kind === "assistant_text" ? entry.text : entry.kind))).toEqual([
+      "one",
+      "two",
+    ]);
+
+    const empty = readSessionTail(file, { sinceOffset: first.nextOffset });
+    expect(empty.entries).toEqual([]);
+    expect(empty.bytesRead).toBe(0);
+    expect(empty.nextOffset).toBe(size);
+    expect(empty.resynced).toBe(false);
+    expect(empty.truncatedStart).toBe(false);
+  });
+
+  test("delta read returns only new bytes appended after sinceOffset", () => {
+    const file = tempFile("delta-only-new.jsonl");
+    writeJsonlLines(file, [textLine("first")]);
+    const firstOffset = fs.statSync(file).size;
+
+    fs.appendFileSync(file, `${textLine("second")}\n`, "utf-8");
+    const secondOffset = fs.statSync(file).size;
+
+    const delta = readSessionTail(file, { sinceOffset: firstOffset });
+
+    expect(delta.nextOffset).toBe(secondOffset);
+    expect(delta.resynced).toBe(false);
+    expect(delta.truncatedStart).toBe(false);
+    expect(delta.entries).toEqual([
+      { kind: "assistant_text", text: "second", stopReason: "message_end" },
+    ]);
+  });
+
+  test("stale sinceOffset (greater than current file size) resyncs from end", () => {
+    const file = tempFile("delta-stale.jsonl");
+    writeJsonlLines(file, [textLine("only")]);
+    const size = fs.statSync(file).size;
+
+    const result = readSessionTail(file, { sinceOffset: size + 5_000 });
+
+    expect(result.resynced).toBe(true);
+    expect(result.nextOffset).toBe(size);
+    expect(result.entries).toEqual([
+      { kind: "assistant_text", text: "only", stopReason: "message_end" },
+    ]);
+  });
+
+  test("negative or non-integer sinceOffset resyncs from end", () => {
+    const file = tempFile("delta-invalid.jsonl");
+    writeJsonlLines(file, [textLine("payload")]);
+
+    const negative = readSessionTail(file, { sinceOffset: -1 });
+    expect(negative.resynced).toBe(true);
+    expect(negative.entries).toEqual([
+      { kind: "assistant_text", text: "payload", stopReason: "message_end" },
+    ]);
+
+    const fractional = readSessionTail(file, { sinceOffset: 2.5 });
+    expect(fractional.resynced).toBe(true);
+    expect(fractional.entries).toEqual([
+      { kind: "assistant_text", text: "payload", stopReason: "message_end" },
+    ]);
+  });
+
+  test("sinceOffset landing mid-line drops the partial first line but keeps subsequent JSONL parseable", () => {
+    const file = tempFile("delta-partial-line.jsonl");
+    const lineA = textLine("alpha-line-with-enough-bytes-to-split-here");
+    const lineB = textLine("beta");
+    writeJsonlLines(file, [lineA, lineB]);
+
+    // Point sinceOffset into the middle of the first JSONL line so the delta
+    // read has to skip a partial line before parsing.
+    const midOfFirstLine = Math.floor(lineA.length / 2);
+
+    const result = readSessionTail(file, { sinceOffset: midOfFirstLine });
+
+    expect(result.resynced).toBe(false);
+    expect(result.truncatedStart).toBe(true);
+    expect(result.malformedLineCount).toBe(0);
+    expect(result.entries).toEqual([
+      { kind: "assistant_text", text: "beta", stopReason: "message_end" },
+    ]);
+  });
+
+  test("tail-from-end is clamped to the hard cap even when maxBytes is huge", () => {
+    const file = tempFile("hard-cap-tail.jsonl");
+    // Produce a payload far larger than TAIL_HARD_CAP_BYTES.
+    const bulkLines = Array.from({ length: 200 }, (_v, index) => textLine(`bulk-${index}-${"x".repeat(80)}`));
+    writeJsonlLines(file, bulkLines);
+
+    const result = readSessionTail(file, { maxBytes: 10 * 1024 * 1024 });
+
+    // Even if the caller asks for 10 MB, at most TAIL_HARD_CAP_BYTES are read.
+    expect(result.bytesRead).toBeLessThanOrEqual(TAIL_HARD_CAP_BYTES);
+    expect(result.truncatedStart).toBe(true);
+    expect(result.nextOffset).toBe(fs.statSync(file).size);
+  });
+
+  test("delta reads are also clamped to the hard cap when the gap exceeds it", () => {
+    const file = tempFile("hard-cap-delta.jsonl");
+    writeJsonlLines(file, [textLine("seed")]);
+    const seedOffset = fs.statSync(file).size;
+
+    // Append well over TAIL_HARD_CAP_BYTES worth of new lines.
+    const extra = Array.from({ length: 200 }, (_v, index) => textLine(`extra-${index}-${"y".repeat(80)}`));
+    fs.appendFileSync(file, `${extra.join("\n")}\n`, "utf-8");
+    const finalSize = fs.statSync(file).size;
+
+    const result = readSessionTail(file, { sinceOffset: seedOffset });
+
+    expect(result.bytesRead).toBeLessThanOrEqual(TAIL_HARD_CAP_BYTES);
+    expect(result.truncatedStart).toBe(true);
+    expect(result.resynced).toBe(false);
+    expect(result.nextOffset).toBe(finalSize);
+  });
+});
+
