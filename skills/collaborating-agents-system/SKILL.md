@@ -198,6 +198,23 @@ Users can also spawn subagents via the `/subagent` command:
 6. **Collect worker completion output** (auto-collected by orchestrator)
 7. **Release reservations** after merge/finalization
 
+### Automatic completion wake-up
+
+By default, final subagent completions are visible but do not start a coordinator turn. Projects can set:
+
+```json
+{
+  "subagentCompletionDisplay": "hidden",
+  "triggerTurnOnSubagentCompletion": true
+}
+```
+
+Hidden completion sends a minimal Pi custom-message wake token with `display: false` and child Run ID(s), not the child's final report. In the automatically triggered turn, inspect each result with `agent_message({ action: "session", runId })` and use `agent_message({ action: "tail", runId })` when transcript detail is needed. Full output remains in the durable run/session registry.
+
+When automatic triggering is enabled, it replaces task instructions that tell the subagent to send an urgent completion DM solely to wake the coordinator. Do not use both for the same completion; the urgent DM and automatic trigger can race and produce competing turns.
+
+For a fully quiet handoff, also set `subagentLaunchDisplay` to `"hidden"` (which suppresses launch and session-ready `pi.sendMessage` calls entirely) and `subagentProgressIntervalMs` to `0`. Defaults remain full visible launch/completion, normal session-ready behavior, progress every 30 seconds in cmux mode, and no completion-triggered turn.
+
 ## Subagent workflow (required behavior)
 
 Spawned workers use a subagent prompt based on their configured `type` (defaulting to a built-in prompt if no type is specified). At minimum they should:

@@ -86,6 +86,10 @@ export interface ExtensionState {
 
 export type SubagentLaunchMode = "process" | "cmux-pane";
 
+export type SubagentCompletionDisplay = "full" | "hidden";
+
+export type SubagentLaunchDisplay = "full" | "compact" | "hidden";
+
 export type SubagentRunStatus = "launching" | "running" | "completed" | "failed";
 
 export interface SubagentRunRecord {
@@ -151,8 +155,12 @@ export interface CollaboratingAgentsConfig {
   messageHistoryLimit: number;
   subagentLaunchMode: SubagentLaunchMode;
   closeCompletedCmuxPanes: boolean;
+  preserveOrchestratorPane: boolean;
   /** Minimum gap between progress updates posted to the orchestrator, per child. 0 disables them. */
   subagentProgressIntervalMs: number;
+  subagentCompletionDisplay: SubagentCompletionDisplay;
+  triggerTurnOnSubagentCompletion: boolean;
+  subagentLaunchDisplay: SubagentLaunchDisplay;
 }
 
 export type AgentMessageAction =

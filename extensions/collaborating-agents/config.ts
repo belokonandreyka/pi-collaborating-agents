@@ -1,17 +1,34 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { CollaboratingAgentsConfig, SubagentLaunchMode } from "./types.js";
+import type {
+  CollaboratingAgentsConfig,
+  SubagentCompletionDisplay,
+  SubagentLaunchDisplay,
+  SubagentLaunchMode,
+} from "./types.js";
 
 const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
   messageHistoryLimit: 400,
   subagentLaunchMode: "process",
   closeCompletedCmuxPanes: true,
+  preserveOrchestratorPane: false,
   subagentProgressIntervalMs: 30_000,
+  subagentCompletionDisplay: "full",
+  triggerTurnOnSubagentCompletion: false,
+  subagentLaunchDisplay: "full",
 };
 
 function isSubagentLaunchMode(value: unknown): value is SubagentLaunchMode {
   return value === "process" || value === "cmux-pane";
+}
+
+function isSubagentCompletionDisplay(value: unknown): value is SubagentCompletionDisplay {
+  return value === "full" || value === "hidden";
+}
+
+function isSubagentLaunchDisplay(value: unknown): value is SubagentLaunchDisplay {
+  return value === "full" || value === "compact" || value === "hidden";
 }
 
 function resolveHomeDir(): string {
@@ -59,9 +76,23 @@ export function loadConfig(cwd: string): CollaboratingAgentsConfig {
       typeof merged.closeCompletedCmuxPanes === "boolean"
         ? merged.closeCompletedCmuxPanes
         : DEFAULT_CONFIG.closeCompletedCmuxPanes,
+    preserveOrchestratorPane:
+      typeof merged.preserveOrchestratorPane === "boolean"
+        ? merged.preserveOrchestratorPane
+        : DEFAULT_CONFIG.preserveOrchestratorPane,
     subagentProgressIntervalMs:
       typeof merged.subagentProgressIntervalMs === "number" && merged.subagentProgressIntervalMs >= 0
         ? merged.subagentProgressIntervalMs
         : DEFAULT_CONFIG.subagentProgressIntervalMs,
+    subagentCompletionDisplay: isSubagentCompletionDisplay(merged.subagentCompletionDisplay)
+      ? merged.subagentCompletionDisplay
+      : DEFAULT_CONFIG.subagentCompletionDisplay,
+    triggerTurnOnSubagentCompletion:
+      typeof merged.triggerTurnOnSubagentCompletion === "boolean"
+        ? merged.triggerTurnOnSubagentCompletion
+        : DEFAULT_CONFIG.triggerTurnOnSubagentCompletion,
+    subagentLaunchDisplay: isSubagentLaunchDisplay(merged.subagentLaunchDisplay)
+      ? merged.subagentLaunchDisplay
+      : DEFAULT_CONFIG.subagentLaunchDisplay,
   };
 }

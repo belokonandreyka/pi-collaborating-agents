@@ -1409,6 +1409,121 @@ describe("subagent launch identity", () => {
     expect(completionOption).toEqual({ triggerTurn: false });
   });
 
+  test("uses compact launch messages without task or runtime prompt content", async () => {
+    const tempDir = makeTempDir("collab-index-compact-launch");
+    writeFakePiBinary(tempDir);
+    fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, ".pi", "collaborating-agents.json"),
+      JSON.stringify({ subagentLaunchDisplay: "compact" }),
+      "utf-8",
+    );
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.HOME = tempDir;
+    process.env.USERPROFILE = tempDir;
+    process.env.COLLABORATING_AGENTS_DIR = path.join(tempDir, "state");
+
+    const harness = makeHarness();
+    collaboratingAgentsExtension(harness.pi);
+    const subagentTool = harness.tools.get("subagent");
+    if (!subagentTool) throw new Error("subagent tool was not registered");
+
+    const ctx = makeContext(tempDir);
+    await subagentTool.execute("tool-call-compact-launch", { task: "secret task text" }, undefined, undefined, ctx);
+
+    const launchMessage = await waitForLaunchMessage(harness);
+    expect(launchMessage.display).toBe(true);
+    expect(String(launchMessage.content)).toContain("Profile:");
+    expect(String(launchMessage.content)).toContain("Batch ID:");
+    expect(String(launchMessage.content)).toContain("Run ID:");
+    expect(String(launchMessage.content)).toContain("Working directory:");
+    expect(String(launchMessage.content)).toContain("Launch mode:");
+    expect(String(launchMessage.content)).toContain('agent_message({ action: "session", runId:');
+    expect(String(launchMessage.content)).not.toContain("secret task text");
+    expect(String(launchMessage.content)).not.toContain("Runtime task prompt:");
+
+    await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
+  });
+
+  test("sends no hidden launch notices and auto-triggers once with a minimal completion wake token", async () => {
+    const tempDir = makeTempDir("collab-index-hidden-trigger");
+    writeFakePiBinary(tempDir);
+    const childSessionFile = path.join(tempDir, "child-session.jsonl");
+    fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, ".pi", "collaborating-agents.json"),
+      JSON.stringify({
+        subagentLaunchDisplay: "hidden",
+        subagentProgressIntervalMs: 0,
+        subagentCompletionDisplay: "hidden",
+        triggerTurnOnSubagentCompletion: true,
+      }),
+      "utf-8",
+    );
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.HOME = tempDir;
+    process.env.USERPROFILE = tempDir;
+    process.env.COLLABORATING_AGENTS_DIR = path.join(tempDir, "state");
+    process.env.TEST_PI_OUTPUT_TEXT = "complete hidden report";
+    process.env.TEST_PI_REGISTER_SELF = "1";
+    process.env.TEST_PI_REGISTER_SESSION_FILE = childSessionFile;
+
+    const harness = makeHarness();
+    collaboratingAgentsExtension(harness.pi);
+    const subagentTool = harness.tools.get("subagent");
+    if (!subagentTool) throw new Error("subagent tool was not registered");
+
+    let idle = false;
+    const ctx = {
+      ...makeContext(tempDir),
+      isIdle: () => idle,
+    } as ExtensionContext;
+    const toolResult = await subagentTool.execute(
+      "tool-call-hidden-trigger",
+      { task: "Inspect the repo" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const runId = (toolResult.details as { childRunIds: string[] }).childRunIds[0]!;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(harness.sentMessages).toHaveLength(0);
+
+    idle = true;
+    const completionMessage = await waitFor(() => {
+      return harness.sentMessages.find((message): message is Record<string, unknown> => {
+        if (!message || typeof message !== "object") return false;
+        const details = (message as { details?: { mode?: unknown } }).details;
+        return details?.mode === "subagent_completion_wake";
+      });
+    });
+    expect(harness.sentMessages).toHaveLength(1);
+    expect(completionMessage.display).toBe(false);
+    expect(String(completionMessage.content)).toContain(`Run ID: ${runId}`);
+    expect(String(completionMessage.content)).toContain('agent_message({ action: "session", runId:');
+    expect(String(completionMessage.content)).toContain('agent_message({ action: "tail", runId:');
+    expect(String(completionMessage.content)).not.toContain("complete hidden report");
+    expect(JSON.stringify(completionMessage.details)).not.toContain("complete hidden report");
+
+    const completionOption = harness.sentMessageOptions.find(({ message }) => message === completionMessage)?.options;
+    expect(completionOption).toEqual({ triggerTurn: true });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(harness.sentMessageOptions.filter(({ options }) =>
+      (options as { triggerTurn?: boolean } | undefined)?.triggerTurn === true
+    )).toHaveLength(1);
+
+    const completed = await waitForRunRecord(
+      path.join(tempDir, "state"),
+      runId,
+      (record) => record.status === "completed",
+    );
+    expect(completed.outputPreview).toBe("complete hidden report");
+
+    await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
+  });
+
   test("marks subagent run records failed when the child process fails", async () => {
     const tempDir = makeTempDir("collab-index-lifecycle-failure");
     writeFakePiBinary(tempDir);
@@ -1443,6 +1558,63 @@ describe("subagent launch identity", () => {
 
     const completionMessage = await waitForCompletionMessage(harness);
     expect(String(completionMessage.content)).toContain("subagent exploded");
+
+    await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
+  });
+
+  test("keeps hidden failure completion concise while preserving durable failure detail", async () => {
+    const tempDir = makeTempDir("collab-index-hidden-failure");
+    const stateDir = path.join(tempDir, "state");
+    writeFakePiBinary(tempDir);
+    fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, ".pi", "collaborating-agents.json"),
+      JSON.stringify({
+        subagentLaunchDisplay: "hidden",
+        subagentCompletionDisplay: "hidden",
+        triggerTurnOnSubagentCompletion: true,
+      }),
+      "utf-8",
+    );
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.HOME = tempDir;
+    process.env.USERPROFILE = tempDir;
+    process.env.COLLABORATING_AGENTS_DIR = stateDir;
+    process.env.TEST_PI_FAIL_BEFORE_MESSAGE = "1";
+    process.env.TEST_PI_EXIT_CODE = "2";
+    process.env.TEST_PI_STDERR = "private failure detail";
+
+    const harness = makeHarness();
+    collaboratingAgentsExtension(harness.pi);
+    const subagentTool = harness.tools.get("subagent");
+    if (!subagentTool) throw new Error("subagent tool was not registered");
+
+    const ctx = makeContext(tempDir);
+    const toolResult = await subagentTool.execute(
+      "tool-call-hidden-failure",
+      { task: "Inspect the repo" },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const runId = (toolResult.details as { childRunIds: string[] }).childRunIds[0]!;
+    const completionMessage = await waitFor(() => {
+      return harness.sentMessages.find((message): message is Record<string, unknown> => {
+        if (!message || typeof message !== "object") return false;
+        return (message as { details?: { mode?: unknown } }).details?.mode === "subagent_completion_wake";
+      });
+    });
+
+    expect(harness.sentMessages).toHaveLength(1);
+    expect(String(completionMessage.content)).toContain("requires attention");
+    expect(String(completionMessage.content)).toContain(`Run ID: ${runId}`);
+    expect(String(completionMessage.content)).not.toContain("private failure detail");
+    expect(JSON.stringify(completionMessage.details)).not.toContain("private failure detail");
+    expect(harness.sentMessageOptions[0]?.options).toEqual({ triggerTurn: true });
+
+    const failed = await waitForRunRecord(stateDir, runId, (record) => record.status === "failed");
+    expect(failed.outputPreview).toBe("private failure detail");
 
     await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
   });

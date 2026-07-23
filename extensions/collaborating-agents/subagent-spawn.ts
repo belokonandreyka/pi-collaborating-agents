@@ -230,12 +230,17 @@ function getOrCreateCmuxWorkspaceLayout(args: {
   return existing;
 }
 
-function chooseCmuxSplitLeaf(state: CmuxWorkspaceLayoutState): CmuxLayoutLeafCandidate {
+function chooseCmuxSplitLeaf(
+  state: CmuxWorkspaceLayoutState,
+  preserveOrchestratorPane: boolean,
+): CmuxLayoutLeafCandidate {
   // The shallowest leaf approximates the largest visible pane in the current
-  // split tree. On ties, prefer splitting subagent panes so the orchestrator
-  // stays larger for longer.
+  // split tree. Preserved layouts balance only within the subagent subtree once
+  // it exists; legacy layouts merely prefer subagents on depth ties.
   const leaves = collectCmuxLayoutLeaves(state.root);
-  const [selected] = leaves.sort((a, b) => {
+  const subagentLeaves = preserveOrchestratorPane ? leaves.filter((leaf) => leaf.role === "subagent") : [];
+  const candidates = subagentLeaves.length > 0 ? subagentLeaves : leaves;
+  const [selected] = candidates.sort((a, b) => {
     if (a.depth !== b.depth) return a.depth - b.depth;
     if (a.role !== b.role) return a.role === "subagent" ? -1 : 1;
     if (a.order !== b.order) return a.order - b.order;
@@ -668,6 +673,25 @@ function quoteShellArg(value: string): string {
 
 function buildLaunchCommand(args: string[]): string {
   return `pi ${args.map(quoteShellArg).join(" ")}`;
+}
+
+const CMUX_INHERITED_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "COLLABORATING_AGENTS_DIR",
+  "PI_COLLAB_SUBAGENT_MAX_DEPTH",
+  "PI_CODING_AGENT_DIR",
+  "CLAUDE_CONFIG_DIR",
+] as const;
+
+export function collectCmuxInheritedEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const inherited: Record<string, string> = {};
+  for (const key of CMUX_INHERITED_ENV_KEYS) {
+    const value = source[key];
+    if (typeof value === "string" && value.length > 0) inherited[key] = value;
+  }
+  return inherited;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1337,7 +1361,10 @@ async function reorderCmuxSurfaceBefore(args: {
   return reordered.exitCode === 0;
 }
 
-async function rebalanceCmuxWorkspaceSurfaces(state: CmuxWorkspaceLayoutState): Promise<void> {
+async function rebalanceCmuxWorkspaceSurfaces(
+  state: CmuxWorkspaceLayoutState,
+  preserveOrchestratorPane: boolean,
+): Promise<void> {
   // Phase 2: after choosing a balanced split target, reconcile the live cmux
   // workspace back to the planned pane assignment using move/reorder operations.
   const snapshot = await snapshotCmuxWorkspace(state.workspaceRef);
@@ -1355,6 +1382,12 @@ async function rebalanceCmuxWorkspaceSurfaces(state: CmuxWorkspaceLayoutState): 
     const currentPaneRef = surfaceToPane.get(leaf.surfaceRef);
     if (!currentPaneRef || currentPaneRef === leaf.paneRef) continue;
     if (!snapshot.has(leaf.paneRef)) continue;
+    const liveOrchestratorPaneRef = surfaceToPane.get(state.orchestratorSurfaceRef);
+    if (
+      preserveOrchestratorPane
+      && leaf.role === "subagent"
+      && (leaf.paneRef === state.orchestratorPaneRef || leaf.paneRef === liveOrchestratorPaneRef)
+    ) continue;
 
     const targetPaneSurfaces = snapshot.get(leaf.paneRef) ?? [];
     const orderAnchor = targetPaneSurfaces.find((surfaceRef) => surfaceRef !== leaf.surfaceRef);
@@ -1429,7 +1462,10 @@ async function createCmuxSplit(args: {
   return { ok: false, error: errors.filter(Boolean).join(" | ") || "Failed to create cmux pane" };
 }
 
-async function launchCmuxPane(args: { scriptPath: string }): Promise<
+async function launchCmuxPane(args: {
+  scriptPath: string;
+  preserveOrchestratorPane: boolean;
+}): Promise<
   | {
       ok: true;
       workspaceRef: string;
@@ -1457,7 +1493,7 @@ async function launchCmuxPane(args: { scriptPath: string }): Promise<
     if (beforeSnapshot.size > 0) {
       syncCmuxLayoutStateWithSnapshot(layoutState, beforeSnapshot);
     }
-    let splitTarget = chooseCmuxSplitLeaf(layoutState);
+    let splitTarget = chooseCmuxSplitLeaf(layoutState, args.preserveOrchestratorPane);
     let splitDirection = chooseCmuxSplitDirection(splitTarget);
 
     let split = await createCmuxSplit({
@@ -1472,7 +1508,7 @@ async function launchCmuxPane(args: { scriptPath: string }): Promise<
         paneRef: splitTarget.paneRef,
         surfaceRef: splitTarget.surfaceRef,
       });
-      splitTarget = chooseCmuxSplitLeaf(layoutState);
+      splitTarget = chooseCmuxSplitLeaf(layoutState, args.preserveOrchestratorPane);
       splitDirection = chooseCmuxSplitDirection(splitTarget);
       split = await createCmuxSplit({
         workspaceRef: callerContext.workspaceRef,
@@ -1522,7 +1558,7 @@ async function launchCmuxPane(args: { scriptPath: string }): Promise<
       return { ok: false, error: send.stderr || send.stdout || "Failed to send command to cmux pane" };
     }
 
-    await rebalanceCmuxWorkspaceSurfaces(layoutState);
+    await rebalanceCmuxWorkspaceSurfaces(layoutState, args.preserveOrchestratorPane);
 
     const postRebalanceIdentify = await runCmuxCommand([
       "identify",
@@ -1570,6 +1606,7 @@ export async function runSpawnTask(
     launchDelayMs?: number;
     launchMode?: "process" | "cmux-pane";
     closeCompletedCmuxPane?: boolean;
+    preserveOrchestratorPane?: boolean;
     cmuxResultTimeoutMs?: number;
     onLaunch?: (launch: SpawnResult) => void | Promise<void>;
     onSessionMetadata?: SpawnSessionMetadataCallback;
@@ -1685,24 +1722,10 @@ export async function runSpawnTask(
 
   if (result.launchMode === "cmux-pane") {
     const cmuxLaunchEnv: Record<string, string> = {
+      ...collectCmuxInheritedEnv(),
       PI_AGENT_NAME: result.launchEnv.PI_AGENT_NAME,
       PI_COLLAB_SUBAGENT_DEPTH: result.launchEnv.PI_COLLAB_SUBAGENT_DEPTH,
     };
-    if (typeof process.env.PATH === "string" && process.env.PATH.length > 0) {
-      cmuxLaunchEnv.PATH = process.env.PATH;
-    }
-    if (typeof process.env.HOME === "string" && process.env.HOME.length > 0) {
-      cmuxLaunchEnv.HOME = process.env.HOME;
-    }
-    if (typeof process.env.USERPROFILE === "string" && process.env.USERPROFILE.length > 0) {
-      cmuxLaunchEnv.USERPROFILE = process.env.USERPROFILE;
-    }
-    if (typeof process.env.COLLABORATING_AGENTS_DIR === "string" && process.env.COLLABORATING_AGENTS_DIR.length > 0) {
-      cmuxLaunchEnv.COLLABORATING_AGENTS_DIR = process.env.COLLABORATING_AGENTS_DIR;
-    }
-    if (typeof process.env.PI_COLLAB_SUBAGENT_MAX_DEPTH === "string" && process.env.PI_COLLAB_SUBAGENT_MAX_DEPTH.length > 0) {
-      cmuxLaunchEnv.PI_COLLAB_SUBAGENT_MAX_DEPTH = process.env.PI_COLLAB_SUBAGENT_MAX_DEPTH;
-    }
 
     const cmuxLaunchScript = createCmuxPaneLaunchScript({
       piArgs: args,
@@ -1713,7 +1736,10 @@ export async function runSpawnTask(
       runId: options.runId,
     });
 
-    const cmuxLaunch = await launchCmuxPane({ scriptPath: cmuxLaunchScript.command });
+    const cmuxLaunch = await launchCmuxPane({
+      scriptPath: cmuxLaunchScript.command,
+      preserveOrchestratorPane: options.preserveOrchestratorPane ?? false,
+    });
 
     if (!cmuxLaunch.ok) {
       try {

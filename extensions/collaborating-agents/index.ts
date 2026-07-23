@@ -1503,6 +1503,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         parentAgentName: state.agentName,
         launchMode: config.subagentLaunchMode,
         closeCompletedCmuxPane: config.closeCompletedCmuxPanes,
+        preserveOrchestratorPane: config.preserveOrchestratorPane,
         onLaunch: (launch) => {
           markSubagentRunLaunched(childRunIds[0]!, typeConfig.name, launch, runRecordWarnings);
           progressName = launch.name || progressName;
@@ -1595,6 +1596,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         launchDelayMs: launchStaggerMs * index,
         launchMode: config.subagentLaunchMode,
         closeCompletedCmuxPane: config.closeCompletedCmuxPanes,
+        preserveOrchestratorPane: config.preserveOrchestratorPane,
         onLaunch: (launch) => {
           markSubagentRunLaunched(recordId, typeConfig.name, launch, runRecordWarnings);
           progressName = launch.name || progressName;
@@ -1715,40 +1717,57 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
   }
 
   function sendSubagentLaunchUpdate(profile: string, launch: SpawnResult, recordId: string, batchRunId: string): void {
+    if (config.subagentLaunchDisplay === "hidden") return;
+
+    const inspectionLines = [
+      "",
+      "Inspect this subagent:",
+      `- agent_message({ action: "session", runId: "${recordId}" })`,
+      `- agent_message({ action: "tail", runId: "${recordId}" })`,
+      `- agent_message({ action: "sessions" })`,
+    ];
+    const compactLines = [
+      `Spawning subagent "${formatAgentDisplayName(launch.name)}".`,
+      `Profile: ${profile}`,
+      `Batch ID: ${batchRunId}`,
+      `Run ID: ${recordId}`,
+      `Working directory: ${launch.workingDirectory}`,
+      `Launch mode: ${launch.launchMode}`,
+      ...inspectionLines,
+    ];
+    const fullLines = [
+      `Spawning subagent "${formatAgentDisplayName(launch.name)}".`,
+      "",
+      "Task sent to subagent:",
+      "```text",
+      launch.task,
+      "```",
+      "",
+      "Runtime task prompt:",
+      "```text",
+      launch.launchPrompt,
+      "```",
+      "",
+      `Profile: ${profile}`,
+      `Batch ID: ${batchRunId}`,
+      `Run ID: ${recordId}`,
+      `Runtime subagent name: ${launch.name}`,
+      `Display name: ${formatAgentDisplayName(launch.name)}`,
+      `Session ID: ${launch.sessionId ?? "(not reported yet)"}`,
+      `Session file: ${formatSessionFileStatus(launch)}`,
+      `Working directory: ${launch.workingDirectory}`,
+      `Launch mode: ${launch.launchMode}`,
+      `cmux target: ${launch.cmuxWorkspaceRef ? `${launch.cmuxWorkspaceRef}${launch.cmuxPaneRef ? ` / ${launch.cmuxPaneRef}` : ""}${launch.cmuxSurfaceRef ? ` / ${launch.cmuxSurfaceRef}` : ""}` : "(not using cmux)"}`,
+      `Type system prompt: ${launch.launchSystemPromptSource ? `${launch.launchSystemPromptSource} (${launch.launchSystemPromptLength ?? 0} chars)` : "(none)"}`,
+      "(Type system prompt content is redacted in launch updates.)",
+      ...inspectionLines,
+    ];
+    const content = config.subagentLaunchDisplay === "compact" ? compactLines : fullLines;
+
     sendSubagentStatusPayload(
       {
         customType: "collab_focus_status",
-        content: [
-          `Spawning subagent "${formatAgentDisplayName(launch.name)}".`,
-          "",
-          "Task sent to subagent:",
-          "```text",
-          launch.task,
-          "```",
-          "",
-          "Runtime task prompt:",
-          "```text",
-          launch.launchPrompt,
-          "```",
-          "",
-          `Profile: ${profile}`,
-          `Batch ID: ${batchRunId}`,
-          `Run ID: ${recordId}`,
-          `Runtime subagent name: ${launch.name}`,
-          `Display name: ${formatAgentDisplayName(launch.name)}`,
-          `Session ID: ${launch.sessionId ?? "(not reported yet)"}`,
-          `Session file: ${formatSessionFileStatus(launch)}`,
-          `Working directory: ${launch.workingDirectory}`,
-          `Launch mode: ${launch.launchMode}`,
-          `cmux target: ${launch.cmuxWorkspaceRef ? `${launch.cmuxWorkspaceRef}${launch.cmuxPaneRef ? ` / ${launch.cmuxPaneRef}` : ""}${launch.cmuxSurfaceRef ? ` / ${launch.cmuxSurfaceRef}` : ""}` : "(not using cmux)"}`,
-          `Type system prompt: ${launch.launchSystemPromptSource ? `${launch.launchSystemPromptSource} (${launch.launchSystemPromptLength ?? 0} chars)` : "(none)"}`,
-          "(Type system prompt content is redacted in launch updates.)",
-          "",
-          "Inspect this subagent:",
-          `- agent_message({ action: "session", runId: "${recordId}" })`,
-          `- agent_message({ action: "tail", runId: "${recordId}" })`,
-          `- agent_message({ action: "sessions" })`,
-        ].join("\n"),
+        content: content.join("\n"),
         display: true,
         details: {
           mode: "subagent_launch",
@@ -1830,6 +1849,8 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     if (previous) return;
 
     subagentSessionNoticeLevels.set(recordId, level);
+    if (config.subagentLaunchDisplay === "hidden") return;
+
     sendSubagentStatusPayload(
       {
         customType: "collab_focus_status",
@@ -1982,11 +2003,15 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     }, 100);
   }
 
-  function trySendSubagentStatusPayload(payload: SubagentCompletionMessagePayload, ctx: ExtensionContext): boolean {
+  function trySendSubagentStatusPayload(
+    payload: SubagentCompletionMessagePayload,
+    ctx: ExtensionContext,
+    triggerTurn = false,
+  ): boolean {
     if (!ctx.isIdle()) return false;
 
     try {
-      pi.sendMessage(payload, { triggerTurn: false });
+      pi.sendMessage(payload, { triggerTurn });
       return true;
     } catch {
       return false;
@@ -2001,8 +2026,9 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     payload: SubagentCompletionMessagePayload,
     targetSessionFile: string | undefined,
     ctx?: ExtensionContext,
+    triggerTurn = false,
   ): void {
-    pendingSubagentCompletionUpdates.push({ payload, targetSessionFile });
+    pendingSubagentCompletionUpdates.push({ payload, targetSessionFile, triggerTurn });
     schedulePendingSubagentCompletionFlush(ctx);
   }
 
@@ -2024,7 +2050,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
 
     const retry: PendingSubagentCompletionUpdate[] = [];
     for (const entry of deliverable) {
-      if (!trySendSubagentStatusPayload(entry.payload, ctx)) {
+      if (!trySendSubagentStatusPayload(entry.payload, ctx, entry.triggerTurn)) {
         retry.push(entry);
       }
     }
@@ -2070,7 +2096,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
   function sendSubagentStatusPayload(
     payload: SubagentCompletionMessagePayload,
     ctx?: ExtensionContext,
-    options?: { targetSessionFile?: string },
+    options?: { targetSessionFile?: string; triggerTurn?: boolean },
   ): void {
     const activeCtx = ctx ?? lastContext;
     if (!activeCtx) {
@@ -2086,12 +2112,12 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     const targetSessionFile = resolveSubagentCompletionTargetSessionFile(options?.targetSessionFile);
 
     if (shouldDeferSubagentCompletionUpdate({ targetSessionFile, activeSessionFile })) {
-      queueSubagentCompletionPayload(payload, targetSessionFile, activeCtx);
+      queueSubagentCompletionPayload(payload, targetSessionFile, activeCtx, options?.triggerTurn);
       return;
     }
 
-    if (!trySendSubagentStatusPayload(payload, activeCtx)) {
-      queueSubagentCompletionPayload(payload, targetSessionFile, activeCtx);
+    if (!trySendSubagentStatusPayload(payload, activeCtx, options?.triggerTurn)) {
+      queueSubagentCompletionPayload(payload, targetSessionFile, activeCtx, options?.triggerTurn);
     }
   }
 
@@ -2104,22 +2130,52 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     ctx: ExtensionContext,
     options?: { targetSessionFile?: string },
   ): void {
-    sendSubagentStatusPayload(buildSubagentCompletionMessagePayload(result), ctx, options);
+    sendSubagentStatusPayload(
+      buildSubagentCompletionMessagePayload(result, {
+        hiddenWake: config.subagentCompletionDisplay === "hidden",
+      }),
+      ctx,
+      {
+        ...options,
+        triggerTurn: config.triggerTurnOnSubagentCompletion,
+      },
+    );
   }
 
   function sendSubagentFailureUpdate(
     errorMessage: string,
+    childRunIds: string[],
     ctx: ExtensionContext,
     options?: { targetSessionFile?: string },
   ): void {
-    const payload: SubagentCompletionMessagePayload = {
-      customType: "collab_focus_status",
-      content: `Subagent failed to run: ${errorMessage}`,
-      display: true,
-      details: { mode: "subagent", error: errorMessage },
-    };
+    const hidden = config.subagentCompletionDisplay === "hidden";
+    const inspectionLines = childRunIds.flatMap((runId) => [
+      `- agent_message({ action: "session", runId: "${runId}" })`,
+      `- agent_message({ action: "tail", runId: "${runId}" })`,
+    ]);
+    const payload: SubagentCompletionMessagePayload = hidden
+      ? {
+          customType: "collab_focus_status",
+          content: [
+            "Subagent run failed.",
+            childRunIds.length === 1 ? `Run ID: ${childRunIds[0]}` : `Run IDs: ${childRunIds.join(", ")}`,
+            "Inspect the durable run record and transcript for failure details:",
+            ...inspectionLines,
+          ].join("\n"),
+          display: false,
+          details: { mode: "subagent_completion_wake", childRunIds, failed: true },
+        }
+      : {
+          customType: "collab_focus_status",
+          content: `Subagent failed to run: ${errorMessage}`,
+          display: true,
+          details: { mode: "subagent", error: errorMessage },
+        };
 
-    sendSubagentStatusPayload(payload, ctx, options);
+    sendSubagentStatusPayload(payload, ctx, {
+      ...options,
+      triggerTurn: config.triggerTurnOnSubagentCompletion,
+    });
   }
 
   function markAsOrchestrator(ctx: ExtensionContext): void {
@@ -2247,7 +2303,20 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        sendSubagentFailureUpdate(msg, ctx, { targetSessionFile: launchSessionFile });
+        const now = new Date().toISOString();
+        for (const recordId of childRunIds) {
+          try {
+            updateSubagentRunRecord(dirs, recordId, {
+              status: "failed",
+              lastSeenAt: now,
+              completedAt: now,
+              outputPreview: msg,
+            });
+          } catch {
+            // Failure notification remains available even if durable storage is unavailable.
+          }
+        }
+        sendSubagentFailureUpdate(msg, childRunIds, ctx, { targetSessionFile: launchSessionFile });
         if (ctx.hasUI) ctx.ui.notify("Subagent failed", "error");
       } finally {
         state.activeSubagentRuns = Math.max(0, state.activeSubagentRuns - 1);

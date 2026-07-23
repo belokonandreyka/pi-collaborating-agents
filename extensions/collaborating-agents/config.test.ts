@@ -8,6 +8,17 @@ const tempDirs: string[] = [];
 const ORIGINAL_HOME = process.env.HOME;
 const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 
+const DEFAULT_CONFIG = {
+  messageHistoryLimit: 400,
+  subagentLaunchMode: "process",
+  closeCompletedCmuxPanes: true,
+  preserveOrchestratorPane: false,
+  subagentProgressIntervalMs: 30_000,
+  subagentCompletionDisplay: "full",
+  triggerTurnOnSubagentCompletion: false,
+  subagentLaunchDisplay: "full",
+};
+
 function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
   tempDirs.push(dir);
@@ -34,14 +45,12 @@ afterEach(() => {
 });
 
 describe("config loading", () => {
-  test("uses default history limit when no config files exist", () => {
+  test("uses defaults when no config files exist", () => {
     const home = makeTempDir("collab-config-home-default");
     setHome(home);
 
     const cwd = makeTempDir("collab-config-cwd-default");
-    const config = loadConfig(cwd);
-
-    expect(config).toEqual({ messageHistoryLimit: 400, subagentLaunchMode: "process", closeCompletedCmuxPanes: true });
+    expect(loadConfig(cwd)).toEqual(DEFAULT_CONFIG);
   });
 
   test("merges global and project configs with project taking precedence", () => {
@@ -50,22 +59,43 @@ describe("config loading", () => {
 
     const globalConfigPath = path.join(home, ".pi", "agent", "collaborating-agents.json");
     fs.mkdirSync(path.dirname(globalConfigPath), { recursive: true });
-    fs.writeFileSync(globalConfigPath, JSON.stringify({ messageHistoryLimit: 250 }), "utf-8");
+    fs.writeFileSync(
+      globalConfigPath,
+      JSON.stringify({ messageHistoryLimit: 250, subagentCompletionDisplay: "full" }),
+      "utf-8",
+    );
 
     const cwd = makeTempDir("collab-config-cwd-merge");
     const projectConfigPath = path.join(cwd, ".pi", "collaborating-agents.json");
     fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true });
     fs.writeFileSync(
       projectConfigPath,
-      JSON.stringify({ messageHistoryLimit: 75, subagentLaunchMode: "cmux-pane", closeCompletedCmuxPanes: false }),
+      JSON.stringify({
+        messageHistoryLimit: 75,
+        subagentLaunchMode: "cmux-pane",
+        closeCompletedCmuxPanes: false,
+        preserveOrchestratorPane: true,
+        subagentProgressIntervalMs: 5_000,
+        subagentCompletionDisplay: "hidden",
+        triggerTurnOnSubagentCompletion: true,
+        subagentLaunchDisplay: "compact",
+      }),
       "utf-8",
     );
 
-    const config = loadConfig(cwd);
-    expect(config).toEqual({ messageHistoryLimit: 75, subagentLaunchMode: "cmux-pane", closeCompletedCmuxPanes: false });
+    expect(loadConfig(cwd)).toEqual({
+      messageHistoryLimit: 75,
+      subagentLaunchMode: "cmux-pane",
+      closeCompletedCmuxPanes: false,
+      preserveOrchestratorPane: true,
+      subagentProgressIntervalMs: 5_000,
+      subagentCompletionDisplay: "hidden",
+      triggerTurnOnSubagentCompletion: true,
+      subagentLaunchDisplay: "compact",
+    });
   });
 
-  test("falls back to default when config content is malformed or invalid", () => {
+  test("falls back to defaults when config content is malformed or invalid", () => {
     const home = makeTempDir("collab-config-home-invalid");
     setHome(home);
 
@@ -76,22 +106,20 @@ describe("config loading", () => {
     const cwd = makeTempDir("collab-config-cwd-invalid");
     const projectConfigPath = path.join(cwd, ".pi", "collaborating-agents.json");
     fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true });
-    fs.writeFileSync(projectConfigPath, JSON.stringify({ messageHistoryLimit: 0 }), "utf-8");
+    fs.writeFileSync(
+      projectConfigPath,
+      JSON.stringify({
+        messageHistoryLimit: 0,
+        subagentLaunchMode: "cmux-window",
+        preserveOrchestratorPane: "yes",
+        subagentProgressIntervalMs: -1,
+        subagentCompletionDisplay: "summary",
+        triggerTurnOnSubagentCompletion: "yes",
+        subagentLaunchDisplay: "verbose",
+      }),
+      "utf-8",
+    );
 
-    const config = loadConfig(cwd);
-    expect(config).toEqual({ messageHistoryLimit: 400, subagentLaunchMode: "process", closeCompletedCmuxPanes: true });
-  });
-
-  test("falls back to process mode when subagent launch mode is invalid", () => {
-    const home = makeTempDir("collab-config-home-invalid-launch-mode");
-    setHome(home);
-
-    const cwd = makeTempDir("collab-config-cwd-invalid-launch-mode");
-    const projectConfigPath = path.join(cwd, ".pi", "collaborating-agents.json");
-    fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true });
-    fs.writeFileSync(projectConfigPath, JSON.stringify({ subagentLaunchMode: "cmux-window" }), "utf-8");
-
-    const config = loadConfig(cwd);
-    expect(config).toEqual({ messageHistoryLimit: 400, subagentLaunchMode: "process", closeCompletedCmuxPanes: true });
+    expect(loadConfig(cwd)).toEqual(DEFAULT_CONFIG);
   });
 });

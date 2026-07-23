@@ -57,7 +57,54 @@ describe("subagent completion payload helpers", () => {
     expect(payload.content).toContain("## Summary\nall good");
     expect(payload.content).toContain('agent_message({ action: "tail", runId: "run-single" })');
     expect(payload.content).toContain('agent_message({ action: "session", runId: "run-single" })');
+    expect(payload.display).toBe(true);
     expect(payload.details).toEqual({ mode: "subagent", result: single, childRunIds: ["run-single"] });
+  });
+
+  test("buildSubagentCompletionMessagePayload creates a minimal hidden wake token", () => {
+    const single = makeSpawnResult({ output: "full completion report" });
+
+    const payload = buildSubagentCompletionMessagePayload(
+      {
+        content: [{ type: "text", text: "fallback" }],
+        details: { mode: "subagent", result: single, childRunIds: ["run-hidden"] },
+      },
+      { hiddenWake: true },
+    );
+
+    expect(payload.display).toBe(false);
+    expect(payload.content).toContain("Run ID: run-hidden");
+    expect(payload.content).toContain('agent_message({ action: "session", runId: "run-hidden" })');
+    expect(payload.content).toContain('agent_message({ action: "tail", runId: "run-hidden" })');
+    expect(payload.content).not.toContain("full completion report");
+    expect(payload.content).not.toContain("fallback");
+    expect(payload.details).toEqual({ mode: "subagent_completion_wake", childRunIds: ["run-hidden"], failed: false });
+  });
+
+  test("buildSubagentCompletionMessagePayload includes every run ID in a parallel hidden wake token", () => {
+    const payload = buildSubagentCompletionMessagePayload(
+      {
+        content: [{ type: "text", text: "parallel secret" }],
+        details: {
+          mode: "subagent",
+          results: [makeSpawnResult({ output: "first secret" }), makeSpawnResult({ output: "second secret" })],
+          childRunIds: ["run-first", "run-second"],
+        },
+        isError: true,
+      },
+      { hiddenWake: true },
+    );
+
+    expect(payload.content).toContain("Run IDs: run-first, run-second");
+    expect(payload.content).toContain('runId: "run-first"');
+    expect(payload.content).toContain('runId: "run-second"');
+    expect(payload.content).not.toContain("first secret");
+    expect(payload.content).not.toContain("second secret");
+    expect(payload.details).toEqual({
+      mode: "subagent_completion_wake",
+      childRunIds: ["run-first", "run-second"],
+      failed: true,
+    });
   });
 
   test("buildSubagentCompletionMessagePayload uses idle-grace wording for auto-closed cmux panes", () => {

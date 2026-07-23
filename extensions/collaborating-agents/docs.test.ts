@@ -34,6 +34,13 @@ describe("collaborating-agents public docs", () => {
     expect(readme).toContain("Manual smoke: process mode");
     expect(readme).toContain("Manual smoke: parallel ambiguity");
     expect(readme).toContain("Manual smoke: cmux mode");
+    expect(readme).toContain('subagentLaunchDisplay` (`"full" | "compact" | "hidden"');
+    expect(readme).toContain('subagentCompletionDisplay` (`"full" | "hidden"');
+    expect(readme).toContain("triggerTurnOnSubagentCompletion");
+    expect(readme).toContain("display: false");
+    expect(readme).toContain("never embeds the child final report");
+    expect(readme).toContain("pi.sendMessage` is not called");
+    expect(readme).toContain("Avoid using both mechanisms");
   });
 
   test("bundled skill documents coordinator session inspection workflow", () => {
@@ -42,5 +49,10 @@ describe("collaborating-agents public docs", () => {
     expectSessionInspectionDocs(skill);
     expect(skill).toContain("Prefer `bun test` for validation");
     expect(skill).toContain("npm pack --dry-run");
+    expect(skill).toContain("subagentCompletionDisplay");
+    expect(skill).toContain("triggerTurnOnSubagentCompletion");
+    expect(skill).toContain("not the child's final report");
+    expect(skill).toContain('agent_message({ action: "session", runId })');
+    expect(skill).toContain("Do not use both for the same completion");
   });
 });

@@ -9,13 +9,14 @@ export interface SubagentCompletionToolResult {
 export interface SubagentCompletionMessagePayload {
   customType: "collab_focus_status";
   content: string;
-  display: true;
+  display: boolean;
   details: Record<string, unknown>;
 }
 
 export interface PendingSubagentCompletionUpdate {
   payload: SubagentCompletionMessagePayload;
   targetSessionFile?: string;
+  triggerTurn?: boolean;
 }
 
 function formatAgentDisplayName(agentName: string): string {
@@ -56,9 +57,33 @@ function inspectionHintLines(runId: string | undefined): string[] {
 
 export function buildSubagentCompletionMessagePayload(
   result: SubagentCompletionToolResult,
+  options?: { hiddenWake?: boolean },
 ): SubagentCompletionMessagePayload {
   const spawnResults = collectSpawnResults(result.details);
   const childRunIds = collectChildRunIds(result.details);
+
+  if (options?.hiddenWake) {
+    const runLabel = childRunIds.length === 1 ? "Run ID" : "Run IDs";
+    const inspectionLines = childRunIds.flatMap((runId) => [
+      `- agent_message({ action: "session", runId: "${runId}" })`,
+      `- agent_message({ action: "tail", runId: "${runId}" })`,
+    ]);
+    if (inspectionLines.length === 0) {
+      inspectionLines.push('- agent_message({ action: "sessions" })');
+    }
+
+    return {
+      customType: "collab_focus_status",
+      content: [
+        result.isError ? "Subagent completion requires attention." : "Subagent completion ready.",
+        childRunIds.length > 0 ? `${runLabel}: ${childRunIds.join(", ")}` : undefined,
+        "Inspect the durable run record and transcript:",
+        ...inspectionLines,
+      ].filter((line): line is string => Boolean(line)).join("\n"),
+      display: false,
+      details: { mode: "subagent_completion_wake", childRunIds, failed: result.isError === true },
+    };
+  }
 
   let intro: string;
   let body: string;

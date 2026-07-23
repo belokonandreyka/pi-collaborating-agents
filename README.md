@@ -89,7 +89,7 @@ Examples:
 
 The user can spawn a single subagent manually using the `/subagent [type] <task>` slash command. By default it runs as a background child process, but you can switch it to a visible cmux pane with `subagentLaunchMode`. When no type is specified, the extension resolves the default subagent type (`worker`/`default`) using the normal override order described below. In slash-command usage, the first token is treated as a type only if it matches a known subagent type; otherwise the full input is treated as the task. All agents use readable two-word callsigns (for example: `SilverHarbor`). An immediate `Spawning subagent ...` status message with runtime name and prompt will be shown immediately.
 
-If you want spawned agents to appear in a visible cmux pane instead of only running as background child processes, set `subagentLaunchMode` to `"cmux-pane"` in your collaborating-agents config. That mode uses `cmux new-split` plus `cmux send`, then launches a real `pi` session directly in the new pane so you see Pi's own terminal output there while the orchestrator still collects the final subagent response automatically. The extension now applies a two-phase layout strategy: it first chooses a balanced split target from the current managed pane tree, then runs a best-effort reconciliation pass with `cmux list-panes`, `cmux list-pane-surfaces`, `cmux move-surface`, and `cmux reorder-surface` so existing managed surfaces are moved back into the intended panes if the workspace drifted. This mode must be invoked from a Pi session that is already running inside a cmux terminal surface; otherwise subagent launch fails.
+If you want spawned agents to appear in a visible cmux pane instead of only running as background child processes, set `subagentLaunchMode` to `"cmux-pane"` in your collaborating-agents config. That mode uses `cmux new-split` plus `cmux send`, then launches a real `pi` session directly in the new pane so you see Pi's own terminal output there while the orchestrator still collects the final subagent response automatically. The extension now applies a two-phase layout strategy: it first chooses a balanced split target from the current managed pane tree (optionally preserving the orchestrator's initial half with `preserveOrchestratorPane`), then runs a best-effort reconciliation pass with `cmux list-panes`, `cmux list-pane-surfaces`, `cmux move-surface`, and `cmux reorder-surface` so existing managed surfaces are moved back into the intended panes if the workspace drifted. This mode must be invoked from a Pi session that is already running inside a cmux terminal surface; otherwise subagent launch fails.
 
 ### Usage
 
@@ -350,7 +350,8 @@ Controls how spawned subagents are launched.
 - `"process"` keeps the current behavior: spawn a background `pi` child process directly.
 - `"cmux-pane"` launches the subagent in a new visible cmux split pane in the current workspace by calling `cmux new-split` and then sending a real `pi` launch command into that pane.
 - In `"cmux-pane"` mode, the extension tracks the orchestrator pane plus visible subagent panes in the workspace and picks the shallowest managed pane for the next split (preferring subagent panes over the orchestrator on ties). It alternates horizontal and vertical split directions by tree depth so the layout trends toward a balanced grid instead of repeatedly slicing columns off the orchestrator pane.
-- After each new pane is created, the extension also snapshots live cmux panes/surfaces and performs a best-effort rebalance pass. If managed surfaces drifted because of manual pane moves or closes, it uses `move-surface`/`reorder-surface` to restore the planned arrangement before continuing.
+- Set `preserveOrchestratorPane` to `true` to reserve the orchestrator's initial half: the first child splits the orchestrator, then later children balance only among live subagent leaves. If every subagent pane has closed, the next child falls back to splitting the orchestrator again.
+- After each new pane is created, the extension also snapshots live cmux panes/surfaces and performs a best-effort rebalance pass. If managed surfaces drifted because of manual pane moves or closes, it uses `move-surface`/`reorder-surface` to restore the planned arrangement before continuing. Preserved layouts never move a subagent surface into the orchestrator pane.
 
 Use `"cmux-pane"` when you want every spawned agent to have a real visible terminal in cmux while still preserving automatic result collection in the parent session. The pane shows Pi's native terminal session output instead of a custom JSON renderer.
 
@@ -363,9 +364,21 @@ Example:
 ```json
 {
   "subagentLaunchMode": "cmux-pane",
+  "preserveOrchestratorPane": true,
   "closeCompletedCmuxPanes": true
 }
 ```
+
+#### `preserveOrchestratorPane` (boolean, default: `false`)
+
+Controls whether the orchestrator keeps the half created by the first cmux split.
+
+- `false` preserves the legacy balancing strategy across all managed leaves.
+- `true` allows the first child to split the orchestrator, then selects later split targets only from live subagent leaves using the same depth/order balancing. When no subagent leaf remains after automatic or manual closes, selection falls back to the orchestrator.
+
+Snapshot reconciliation and split retries follow the same boundary: subagent surfaces are not moved into the orchestrator pane, and a failed subagent target retries another live subagent leaf before falling back.
+
+This setting only affects `"cmux-pane"` launch mode.
 
 #### `closeCompletedCmuxPanes` (boolean, default: `true`)
 
@@ -385,6 +398,46 @@ Without this, the orchestrator learns nothing about a child until the child fini
 Updates travel through the same delivery queue as completions, so they wait for the parent to be idle and never trigger a turn on their own — the orchestrator reads accumulated progress on its next turn rather than being interrupted. The interval is what keeps a fleet of children from flooding the parent's context; lower it for closer monitoring at the cost of tokens.
 
 This setting only affects `"cmux-pane"` launch mode, which is the only mode that watches a child session file while it runs.
+
+Set it to `0` together with `subagentLaunchDisplay: "hidden"` when you want no launch, session-ready, or progress messages rendered.
+
+#### `subagentLaunchDisplay` (`"full" | "compact" | "hidden"`, default: `"full"`)
+
+Controls the custom launch message posted after each child starts.
+
+- `"full"` preserves the existing verbose launch block, including the task, runtime prompt, session metadata, and inspection hints.
+- `"compact"` shows only the display name, profile, batch/run IDs, working directory, launch mode, and inspection hints.
+- `"hidden"` suppresses the verbose launch update and related session-ready notice entirely; `pi.sendMessage` is not called for either notice.
+
+This setting does not hide the `subagent` tool result returned to the coordinator, and durable run/session records remain available through `agent_message`. Progress remains independently controlled by `subagentProgressIntervalMs`.
+
+#### `subagentCompletionDisplay` (`"full" | "hidden"`, default: `"full"`)
+
+Controls rendering of the final auto-collected subagent result.
+
+- `"full"` preserves the existing visible final completion message.
+- `"hidden"` sends only a concise custom-message wake token with `display: false`. The token includes child Run IDs and directs the coordinator to `agent_message({ action: "session", runId })` and `agent_message({ action: "tail", runId })`; it never embeds the child final report.
+
+Full output and failure detail remain in the durable run/session registry. This setting applies only to final completion and failure messages. Launch and session-ready behavior is controlled by `subagentLaunchDisplay`, while progress remains independently configured.
+
+#### `triggerTurnOnSubagentCompletion` (boolean, default: `false`)
+
+When `true`, a deliverable final completion is sent with `triggerTurn: true` once the coordinator is idle. The default remains `false` for compatibility. In hidden completion mode, the triggered coordinator turn must inspect the Run IDs from the wake token with `agent_message` `session` / `tail` to retrieve the result.
+
+With automatic turn triggering enabled, subagents do not need to send an urgent completion DM merely to wake the coordinator. Avoid using both mechanisms for the same completion because they can race and start competing coordinator turns.
+
+A quiet auto-resume configuration is:
+
+```json
+{
+  "subagentLaunchDisplay": "hidden",
+  "subagentProgressIntervalMs": 0,
+  "subagentCompletionDisplay": "hidden",
+  "triggerTurnOnSubagentCompletion": true
+}
+```
+
+The coordinator receives no launch or session-ready custom messages. Completion sends one minimal wake token; inspect its Run ID(s) through the durable session registry for the full result.
 
 ### Environment variables
 

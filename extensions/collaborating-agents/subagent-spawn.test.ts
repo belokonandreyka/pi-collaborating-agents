@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { SpawnAgentDefinition } from "./subagent-spawn.ts";
 import {
+  collectCmuxInheritedEnv,
   discoverSpawnAgents,
   mapWithConcurrencyLimit,
   resetCmuxLayoutStateForTests,
@@ -24,6 +25,7 @@ const ORIGINAL_TEST_PI_SESSION_MESSAGE_END_EVENT = process.env.TEST_PI_SESSION_M
 const ORIGINAL_TEST_PI_PROCESS_STDERR = process.env.TEST_PI_PROCESS_STDERR;
 const ORIGINAL_TEST_PI_PROCESS_EXIT_CODE = process.env.TEST_PI_PROCESS_EXIT_CODE;
 const ORIGINAL_TEST_CMUX_CLOSE_FAIL = process.env.TEST_CMUX_CLOSE_FAIL;
+const ORIGINAL_TEST_CMUX_FAIL_SPLIT_REF = process.env.TEST_CMUX_FAIL_SPLIT_REF;
 const ORIGINAL_TEST_PI_EXIT_CODE = process.env.TEST_PI_EXIT_CODE;
 const ORIGINAL_TEST_PI_MULTI_TURN = process.env.TEST_PI_MULTI_TURN;
 const ORIGINAL_TEST_PI_SAME_MTIME_FINAL_ONLY = process.env.TEST_PI_SAME_MTIME_FINAL_ONLY;
@@ -389,6 +391,11 @@ if (args[0] === "new-split") {
   const paneRef = paneIndex >= 0 ? args[paneIndex + 1] : null;
   const surfaceIndex = args.indexOf("--surface");
   const surfaceRefFromArgs = surfaceIndex >= 0 ? args[surfaceIndex + 1] : null;
+  const failRef = process.env.TEST_CMUX_FAIL_SPLIT_REF;
+  if (failRef && (paneRef === "pane:" + failRef || surfaceRefFromArgs === "surface:" + failRef)) {
+    process.stderr.write("forced split failure\\n");
+    process.exit(1);
+  }
   if (paneRef && !state.panes[paneRef]) {
     process.stderr.write("unknown pane\\n");
     process.exit(1);
@@ -652,6 +659,12 @@ afterEach(() => {
     delete process.env.TEST_CMUX_CLOSE_FAIL;
   }
 
+  if (typeof ORIGINAL_TEST_CMUX_FAIL_SPLIT_REF === "string") {
+    process.env.TEST_CMUX_FAIL_SPLIT_REF = ORIGINAL_TEST_CMUX_FAIL_SPLIT_REF;
+  } else {
+    delete process.env.TEST_CMUX_FAIL_SPLIT_REF;
+  }
+
   if (typeof ORIGINAL_TEST_PI_EXIT_CODE === "string") {
     process.env.TEST_PI_EXIT_CODE = ORIGINAL_TEST_PI_EXIT_CODE;
   } else {
@@ -714,6 +727,22 @@ afterEach(() => {
 });
 
 describe("subagent spawn", () => {
+  test("inherits parent profile directories in cmux panes without inventing them", () => {
+    const inherited = collectCmuxInheritedEnv({
+      PATH: "/usr/bin",
+      PI_CODING_AGENT_DIR: "/tmp/pi-personal",
+      CLAUDE_CONFIG_DIR: "/tmp/claude-personal",
+      EMPTY_VALUE: "",
+    });
+
+    expect(inherited).toEqual({
+      PATH: "/usr/bin",
+      PI_CODING_AGENT_DIR: "/tmp/pi-personal",
+      CLAUDE_CONFIG_DIR: "/tmp/claude-personal",
+    });
+    expect(collectCmuxInheritedEnv({ PATH: "/usr/bin" })).toEqual({ PATH: "/usr/bin" });
+  });
+
   test("passes type prompt via --append-system-prompt and redacts it in launch details", async () => {
     const tempDir = makeTempDir("collab-subagent-spawn");
     const { binPath, argsFile } = writeFakePiBinary(tempDir);
@@ -1765,7 +1794,7 @@ describe("subagent spawn", () => {
     expect(capturedPiArgs[capturedPiArgs.length - 1]).toBe(longTask);
   });
 
-  test("rebalances sequential cmux-pane spawns and alternates split directions toward a grid", async () => {
+  test("uses the legacy balanced cmux layout when orchestrator preservation is disabled by default", async () => {
     const tempDir = makeTempDir("collab-subagent-cmux-pane-layout");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: cmuxArgsFile } = writeFakeCmuxBinary(tempDir);
@@ -1813,7 +1842,110 @@ describe("subagent spawn", () => {
     expect(splitDirections).toEqual(["right", "down", "down"]);
   });
 
-  test("removes auto-closed cmux panes from the layout planner before the next spawn", async () => {
+  test("preserves the orchestrator half while balancing sequential launches within the subagent subtree", async () => {
+    const tempDir = makeTempDir("collab-subagent-cmux-pane-preserved-layout");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: cmuxArgsFile } = writeFakeCmuxBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_CMUX_ARGS_FILE = cmuxArgsFile;
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "worker",
+      description: "Worker",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/worker.toml",
+      tools: ["read", "bash"],
+    };
+
+    for (let index = 0; index < 6; index += 1) {
+      const result = await runSpawnTask(
+        tempDir,
+        { agent: "worker", task: `Inspect preserved repository ${index}` },
+        agentDef,
+        {
+          index,
+          runId: `testrun-preserved-layout-${index}`,
+          recursionDepth: 0,
+          launchMode: "cmux-pane",
+          closeCompletedCmuxPane: false,
+          preserveOrchestratorPane: true,
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+    }
+
+    const splitTargets = getCapturedCmuxArgs(cmuxArgsFile)
+      .filter((entry) => entry[0] === "new-split")
+      .map((entry) => entry[entry.indexOf("--panel") + 1]);
+
+    expect(splitTargets).toEqual(["pane:2", "pane:99", "pane:99", "pane:100", "pane:99", "pane:100"]);
+    expect(splitTargets.slice(1)).not.toContain("pane:2");
+  });
+
+  test("retries a failed preserved split on another live subagent pane", async () => {
+    const tempDir = makeTempDir("collab-subagent-cmux-pane-preserved-retry");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: cmuxArgsFile } = writeFakeCmuxBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_CMUX_ARGS_FILE = cmuxArgsFile;
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "worker",
+      description: "Worker",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/worker.toml",
+      tools: ["read", "bash"],
+    };
+
+    for (let index = 0; index < 2; index += 1) {
+      const result = await runSpawnTask(
+        tempDir,
+        { agent: "worker", task: `Prepare preserved pane ${index}` },
+        agentDef,
+        {
+          index,
+          runId: `testrun-preserved-retry-${index}`,
+          recursionDepth: 0,
+          launchMode: "cmux-pane",
+          closeCompletedCmuxPane: false,
+          preserveOrchestratorPane: true,
+        },
+      );
+      expect(result.exitCode).toBe(0);
+    }
+
+    process.env.TEST_CMUX_FAIL_SPLIT_REF = "99";
+    const retryResult = await runSpawnTask(
+      tempDir,
+      { agent: "worker", task: "Retry away from orchestrator" },
+      agentDef,
+      {
+        index: 2,
+        runId: "testrun-preserved-retry-2",
+        recursionDepth: 0,
+        launchMode: "cmux-pane",
+        closeCompletedCmuxPane: false,
+        preserveOrchestratorPane: true,
+      },
+    );
+    delete process.env.TEST_CMUX_FAIL_SPLIT_REF;
+
+    expect(retryResult.exitCode).toBe(0);
+    const panelTargets = getCapturedCmuxArgs(cmuxArgsFile)
+      .filter((entry) => entry[0] === "new-split" && entry.includes("--panel"))
+      .map((entry) => entry[entry.indexOf("--panel") + 1]);
+    expect(panelTargets.slice(-2)).toEqual(["pane:99", "pane:100"]);
+    expect(panelTargets.slice(1)).not.toContain("pane:2");
+  });
+
+  test("removes auto-closed cmux panes from the preserved layout before falling back to the orchestrator", async () => {
     const tempDir = makeTempDir("collab-subagent-cmux-pane-layout-close");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: cmuxArgsFile } = writeFakeCmuxBinary(tempDir);
@@ -1844,6 +1976,7 @@ describe("subagent spawn", () => {
           runId: `testrun-layout-close-${index}`,
           recursionDepth: 0,
           launchMode: "cmux-pane",
+          preserveOrchestratorPane: true,
         },
       );
 
