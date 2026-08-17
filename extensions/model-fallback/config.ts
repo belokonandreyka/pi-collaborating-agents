@@ -8,6 +8,13 @@ export interface ModelFallbackConfig {
   chain: ChainEntry[];
   resumeText: string;
   notifyUser: boolean;
+  /**
+   * Chain entries that cost real money. Switching onto one of these emits
+   * `paidNoticeText` at "error" level so it renders red — the subscription
+   * pools are gone at that point and every further turn is billed.
+   */
+  paidEntries: ChainEntry[];
+  paidNoticeText: string;
 }
 
 export interface ChainEntry {
@@ -18,12 +25,17 @@ export interface ChainEntry {
 export const DEFAULT_RESUME_TEXT =
   "The previous provider exhausted its quota. Continue the current task from where it stopped; do not redo completed work.";
 
+export const DEFAULT_PAID_NOTICE_TEXT =
+  "\u0412\u0421\u0406 \u041b\u0406\u041c\u0406\u0422\u0418 \u0412\u0418\u0427\u0415\u0420\u041f\u0410\u041d\u0406 \u2014 \u043f\u0440\u0430\u0446\u044e\u0454\u043c\u043e \u043d\u0430 \u043f\u043b\u0430\u0442\u043d\u0456\u0439 \u043e\u0441\u043d\u043e\u0432\u0456";
+
 export const DEFAULT_CONFIG: ModelFallbackConfig = {
   enabled: false,
   orchestratorOnly: true,
   chain: [],
   resumeText: DEFAULT_RESUME_TEXT,
   notifyUser: true,
+  paidEntries: [],
+  paidNoticeText: DEFAULT_PAID_NOTICE_TEXT,
 };
 
 function resolveHomeDir(): string {
@@ -102,7 +114,21 @@ export function normalizeConfig(raw: Record<string, unknown>): ModelFallbackConf
         ? raw.resumeText
         : DEFAULT_CONFIG.resumeText,
     notifyUser: typeof raw.notifyUser === "boolean" ? raw.notifyUser : DEFAULT_CONFIG.notifyUser,
+    paidEntries: normalizeChain(raw.paidEntries),
+    paidNoticeText:
+      typeof raw.paidNoticeText === "string" && raw.paidNoticeText.trim().length > 0
+        ? raw.paidNoticeText
+        : DEFAULT_CONFIG.paidNoticeText,
   };
+}
+
+/** Case-insensitive membership test used to decide if a switch is billable. */
+export function isPaidEntry(config: ModelFallbackConfig, entry: ChainEntry): boolean {
+  return config.paidEntries.some(
+    (paid) =>
+      paid.provider.toLowerCase() === entry.provider.toLowerCase() &&
+      paid.id.toLowerCase() === entry.id.toLowerCase(),
+  );
 }
 
 export function loadConfig(cwd: string): ModelFallbackConfig {

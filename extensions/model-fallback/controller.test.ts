@@ -227,4 +227,67 @@ describe("FallbackController", () => {
     const outcome = await harness.controller.handleSettled();
     expect(outcome.kind).toBe("switched");
   });
+
+  test("should emit a red paid notice when switching onto a paid entry", async () => {
+    const harness = makeHarness({
+      current: { provider: "github-copilot", id: "claude-opus-4.7" },
+      config: {
+        chain: [
+          { provider: "github-copilot", id: "claude-opus-4.7" },
+          { provider: "openrouter", id: "google/gemini-3.7-flash" },
+        ],
+        paidEntries: [{ provider: "openrouter", id: "google/gemini-3.7-flash" }],
+        paidNoticeText: "ALL LIMITS EXHAUSTED",
+      },
+      registered: { "openrouter/google/gemini-3.7-flash": true },
+    });
+
+    harness.controller.onProviderResponse(429);
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome.kind).toBe("switched");
+    const paid = harness.notifications.filter((n) => n.level === "error");
+    expect(paid).toHaveLength(1);
+    expect(paid[0]!.message).toBe(
+      "ALL LIMITS EXHAUSTED (openrouter/google/gemini-3.7-flash)",
+    );
+  });
+
+  test("should not emit a paid notice when the target entry is free", async () => {
+    const harness = makeHarness({
+      config: {
+        paidEntries: [{ provider: "openrouter", id: "google/gemini-3.7-flash" }],
+      },
+    });
+
+    harness.controller.onProviderResponse(429);
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome.kind).toBe("switched");
+    expect(harness.notifications.filter((n) => n.level === "error")).toEqual([]);
+  });
+
+  test("should still warn about billing when routine switch chatter is muted", async () => {
+    const harness = makeHarness({
+      current: { provider: "github-copilot", id: "claude-opus-4.7" },
+      config: {
+        notifyUser: false,
+        chain: [
+          { provider: "github-copilot", id: "claude-opus-4.7" },
+          { provider: "openrouter", id: "google/gemini-3.7-flash" },
+        ],
+        paidEntries: [{ provider: "openrouter", id: "google/gemini-3.7-flash" }],
+        paidNoticeText: "ALL LIMITS EXHAUSTED",
+      },
+      registered: { "openrouter/google/gemini-3.7-flash": true },
+    });
+
+    harness.controller.onProviderResponse(429);
+    await harness.controller.handleSettled();
+
+    // notifyUser=false silences the "switched to ..." info line but must not
+    // silence the billing warning.
+    expect(harness.notifications.filter((n) => n.level === "info")).toEqual([]);
+    expect(harness.notifications.filter((n) => n.level === "error")).toHaveLength(1);
+  });
 });

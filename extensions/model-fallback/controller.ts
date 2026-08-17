@@ -1,5 +1,5 @@
 import { classifyError, type FallbackClassification } from "./classify.ts";
-import type { ChainEntry, ModelFallbackConfig } from "./config.ts";
+import { isPaidEntry, type ChainEntry, type ModelFallbackConfig } from "./config.ts";
 
 export interface ControllerModelRef {
   provider: string;
@@ -152,6 +152,15 @@ export class FallbackController {
           this.deps.notify(
             `model-fallback: switched to ${resolved.provider}/${resolved.id} (${classification.reason}).`,
             "info",
+          );
+        }
+
+        // Billing notice is deliberately outside the notifyUser guard: muting
+        // routine switch chatter must not also mute "you are now paying".
+        if (isPaidEntry(this.deps.config, nextModel)) {
+          this.deps.notify(
+            `${this.deps.config.paidNoticeText} (${resolved.provider}/${resolved.id})`,
+            "error",
           );
         }
 

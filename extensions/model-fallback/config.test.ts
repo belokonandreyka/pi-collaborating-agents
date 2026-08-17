@@ -2,7 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DEFAULT_CONFIG, DEFAULT_RESUME_TEXT, loadConfig, parseChainEntry } from "./config.ts";
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_PAID_NOTICE_TEXT,
+  DEFAULT_RESUME_TEXT,
+  isPaidEntry,
+  loadConfig,
+  normalizeConfig,
+  parseChainEntry,
+} from "./config.ts";
 
 const tempDirs: string[] = [];
 const ORIGINAL_HOME = process.env.HOME;
@@ -200,5 +208,60 @@ describe("loadConfig", () => {
 
     const config = loadConfig(cwd);
     expect(config.resumeText).toBe(DEFAULT_RESUME_TEXT);
+  });
+
+  test("should parse paidEntries with the same rules as chain", () => {
+    const home = makeTempDir("mf-config-home-paid");
+    setHome(home);
+    const globalPath = path.join(home, ".pi", "agent", "model-fallback.json");
+    fs.mkdirSync(path.dirname(globalPath), { recursive: true });
+    fs.writeFileSync(
+      globalPath,
+      JSON.stringify({
+        paidEntries: ["openrouter/google/gemini-3.7-flash", "", "no-slash", 42],
+      }),
+      "utf-8",
+    );
+    const cwd = makeTempDir("mf-config-cwd-paid");
+
+    const config = loadConfig(cwd);
+    // Provider is split on the FIRST slash, so the OpenRouter vendor prefix
+    // stays part of the model id; malformed entries are dropped.
+    expect(config.paidEntries).toEqual([
+      { provider: "openrouter", id: "google/gemini-3.7-flash" },
+    ]);
+  });
+
+  test("should default paidEntries to empty and keep the default paid notice", () => {
+    const home = makeTempDir("mf-config-home-paid-default");
+    setHome(home);
+    const cwd = makeTempDir("mf-config-cwd-paid-default");
+
+    const config = loadConfig(cwd);
+    expect(config.paidEntries).toEqual([]);
+    expect(config.paidNoticeText).toBe(DEFAULT_PAID_NOTICE_TEXT);
+  });
+
+  test("should keep default paid notice when project supplies a blank string", () => {
+    const home = makeTempDir("mf-config-home-blank-notice");
+    setHome(home);
+    const cwd = makeTempDir("mf-config-cwd-blank-notice");
+    const projectPath = path.join(cwd, ".pi", "model-fallback.json");
+    fs.mkdirSync(path.dirname(projectPath), { recursive: true });
+    fs.writeFileSync(projectPath, JSON.stringify({ paidNoticeText: "   " }), "utf-8");
+
+    const config = loadConfig(cwd);
+    expect(config.paidNoticeText).toBe(DEFAULT_PAID_NOTICE_TEXT);
+  });
+
+  test("isPaidEntry should match case-insensitively and reject non-members", () => {
+    const config = normalizeConfig({
+      paidEntries: ["OpenRouter/Google/Gemini-3.7-Flash"],
+    });
+
+    expect(isPaidEntry(config, { provider: "openrouter", id: "google/gemini-3.7-flash" })).toBe(
+      true,
+    );
+    expect(isPaidEntry(config, { provider: "openai-codex", id: "gpt-5.6-sol" })).toBe(false);
   });
 });
