@@ -68,6 +68,9 @@ overrides follow `/resume` and session switches correctly.
 | `resumeText`       | `string`              | built-in | Text of the injected continuation message.                                     |
 | `notifyUser`       | `boolean`             | `true`   | Emit UI notifications on switch / skip / exhaustion.                           |
 | `contextWarnings`  | `object[]`            | `[]`     | Per-entry context-size hazards; see below.                                     |
+| `advanceOnCompactionFailure` | `boolean`   | `true`   | Treat a failed overflow compaction as a switch trigger; see below.             |
+| `compactionFailureNoticeText` | `string`   | built-in | Text of the notice emitted when the chain advances for that reason.            |
+| `compactionFailureResumeText` | `string`   | built-in | Continuation text used instead of `resumeText` on a compaction-failure switch. |
 
 ### `contextWarnings`
 
@@ -85,6 +88,50 @@ context size (e.g. right after a compaction).
   "contextWarnings": [{ "entry": "openai-codex/gpt-5.6-sol", "aboveTokens": 270000 }]
 }
 ```
+
+### `advanceOnCompactionFailure`
+
+When a provider runs out of quota mid-conversation and the next chain entry's
+context window cannot hold the history, Pi runs overflow auto-compaction on the
+new provider. If that compaction call also fails, nothing surfaces: the call
+bypasses the response hook, no assistant error message is appended, and the
+failure only reaches an internal event — so `agent_settled` sees a clean state
+and the chain stalls. With this enabled, a `session_before_compact` with
+`reason: "overflow"` that is never followed by a `session_compact` counts as
+its own switch trigger, independent of `classify.ts`, and advances the chain
+with a warning naming both models (emitted regardless of `notifyUser`, since it
+is the only explanation for the model change).
+
+The signal is **inferred**: Pi emits a public event for compaction success but
+none for failure, so "started, never succeeded" is all an extension can
+observe. "Started, never succeeded" also covers a user cancelling the
+compaction — so the guards are deliberately conservative:
+
+- only `reason: "overflow"` counts (a `threshold` or `manual` compaction
+  failing says nothing about provider health);
+- only `willRetry: true` counts — a housekeeping compaction that Pi was not
+  going to retry runs after a complete answer, so nothing is stalled and there
+  is nothing to resume;
+- an attempt orphaned across a new user prompt is dropped: Pi also runs its
+  compaction check before a prompt, outside any agent run, and that attempt
+  must not fire at the settle of the next, unrelated turn;
+- a completed assistant message also drops any attempt still pending from
+  before it;
+- an attempt is ignored when the last assistant `stopReason` was `aborted`.
+
+Cancellation itself is detected via the event's abort signal (aborted on a
+cancel, untouched on a failure), so pressing Esc during a compaction never
+triggers a model switch. Nothing about the compaction itself is changed — the
+handler never cancels it, never supplies a summary, and never throws back into
+Pi.
+
+The injected continuation uses `compactionFailureResumeText`, not `resumeText`:
+a dead compaction is not evidence of an exhausted quota, and the switch's error
+snapshot carries only `classification: "compaction_failure"` — no status or
+message, so an unrelated earlier error cannot ride along as the cause.
+
+Set to `false` to make the whole path inert: no attempt is recorded and nothing
+acts on one.
 
 ### Concrete chain (recommended)
 

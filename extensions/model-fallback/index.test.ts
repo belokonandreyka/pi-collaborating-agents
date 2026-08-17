@@ -394,6 +394,210 @@ describe("model-fallback extension entry", () => {
     });
   });
 
+  test("should advance the chain when an overflow compaction produces no session_compact", async () => {
+    writeGlobalConfig({
+      enabled: true,
+      chain: ["anthropic/opus", "github-copilot/claude"],
+      orchestratorOnly: true,
+      compactionFailureNoticeText: "compaction died",
+      compactionFailureResumeText: "compaction resume",
+    });
+    const fake = makeFakeAPI();
+    factory(toPiApi(fake));
+
+    const notifications: Array<{ message: string; level: string }> = [];
+    const ctx = {
+      cwd: process.cwd(),
+      model: { provider: "anthropic", id: "opus" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: {
+        notify: (message: string, level: string) => {
+          notifications.push({ message, level });
+        },
+      },
+    };
+
+    await emit(fake, "session_start", { reason: "startup" }, ctx);
+    await emit(
+      fake,
+      "session_before_compact",
+      { type: "session_before_compact", reason: "overflow", willRetry: true },
+      ctx,
+    );
+    await emit(fake, "agent_settled", {}, ctx);
+    await flushDeferred();
+
+    expect(fake.setModelCalls).toEqual([{ provider: "github-copilot", id: "claude" }]);
+    expect(fake.sentMessages).toHaveLength(1);
+    expect(fake.sentMessages[0]!.message.content).toBe("compaction resume");
+    expect(fake.sentMessages[0]!.message.details.error).toEqual({
+      classification: "compaction_failure",
+    });
+    expect(notifications.filter((n) => n.level === "warning").map((n) => n.message)).toEqual([
+      "compaction died (anthropic/opus -> github-copilot/claude)",
+    ]);
+    expect(notifications.filter((n) => n.level === "info").map((n) => n.message)).toEqual([
+      "model-fallback: switched to github-copilot/claude (compaction_failure).",
+    ]);
+  });
+
+  test("should drop a compaction attempt orphaned across a new user prompt", async () => {
+    writeGlobalConfig({
+      enabled: true,
+      chain: ["anthropic/opus", "github-copilot/claude"],
+      orchestratorOnly: true,
+    });
+    const fake = makeFakeAPI();
+    factory(toPiApi(fake));
+
+    const ctx = {
+      cwd: process.cwd(),
+      model: { provider: "anthropic", id: "opus" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: () => {} },
+    };
+
+    await emit(fake, "session_start", { reason: "startup" }, ctx);
+    // Pi's pre-prompt compaction check runs outside any agent run and its
+    // result is discarded; before_agent_start fires right after it.
+    await emit(
+      fake,
+      "session_before_compact",
+      { type: "session_before_compact", reason: "overflow", willRetry: true },
+      ctx,
+    );
+    await emit(fake, "before_agent_start", { type: "before_agent_start" }, ctx);
+    await emit(fake, "agent_settled", {}, ctx);
+    await flushDeferred();
+
+    expect(fake.setModelCalls).toEqual([]);
+    expect(fake.sentMessages).toEqual([]);
+  });
+
+  test("should not advance for a compaction Pi was not going to retry", async () => {
+    writeGlobalConfig({
+      enabled: true,
+      chain: ["anthropic/opus", "github-copilot/claude"],
+      orchestratorOnly: true,
+    });
+    const fake = makeFakeAPI();
+    factory(toPiApi(fake));
+
+    const ctx = {
+      cwd: process.cwd(),
+      model: { provider: "anthropic", id: "opus" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: () => {} },
+    };
+
+    await emit(fake, "session_start", { reason: "startup" }, ctx);
+    await emit(
+      fake,
+      "session_before_compact",
+      { type: "session_before_compact", reason: "overflow", willRetry: false },
+      ctx,
+    );
+    await emit(fake, "agent_settled", {}, ctx);
+    await flushDeferred();
+
+    expect(fake.setModelCalls).toEqual([]);
+    expect(fake.sentMessages).toEqual([]);
+  });
+
+  test("should not advance when session_compact reports the compaction succeeded", async () => {
+    writeGlobalConfig({
+      enabled: true,
+      chain: ["anthropic/opus", "github-copilot/claude"],
+      orchestratorOnly: true,
+    });
+    const fake = makeFakeAPI();
+    factory(toPiApi(fake));
+
+    const ctx = {
+      cwd: process.cwd(),
+      model: { provider: "anthropic", id: "opus" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: () => {} },
+    };
+
+    await emit(fake, "session_start", { reason: "startup" }, ctx);
+    await emit(
+      fake,
+      "session_before_compact",
+      { type: "session_before_compact", reason: "overflow", willRetry: true },
+      ctx,
+    );
+    await emit(fake, "session_compact", { type: "session_compact" }, ctx);
+    await emit(fake, "agent_settled", {}, ctx);
+    await flushDeferred();
+
+    expect(fake.setModelCalls).toEqual([]);
+    expect(fake.sentMessages).toEqual([]);
+  });
+
+  test("should not advance when the compaction event's abort signal reports a cancel", async () => {
+    writeGlobalConfig({
+      enabled: true,
+      chain: ["anthropic/opus", "github-copilot/claude"],
+      orchestratorOnly: true,
+    });
+    const fake = makeFakeAPI();
+    factory(toPiApi(fake));
+
+    const ctx = {
+      cwd: process.cwd(),
+      model: { provider: "anthropic", id: "opus" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: () => {} },
+    };
+
+    await emit(fake, "session_start", { reason: "startup" }, ctx);
+    await emit(
+      fake,
+      "session_before_compact",
+      { type: "session_before_compact", reason: "overflow", willRetry: true, signal: { aborted: true } },
+      ctx,
+    );
+    await emit(fake, "agent_settled", {}, ctx);
+    await flushDeferred();
+
+    expect(fake.setModelCalls).toEqual([]);
+    expect(fake.sentMessages).toEqual([]);
+  });
+
+  test("should never alter compaction: handlers return undefined and survive a dormant controller", async () => {
+    writeGlobalConfig({ enabled: true, chain: ["a/b", "c/d"], orchestratorOnly: true });
+    process.env.PI_COLLAB_SUBAGENT_DEPTH = "1";
+    const fake = makeFakeAPI();
+    factory(toPiApi(fake));
+
+    const ctx = {
+      cwd: process.cwd(),
+      model: { provider: "a", id: "b" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: () => {} },
+    };
+    await emit(fake, "session_start", { reason: "startup" }, ctx);
+
+    // A dormant controller (subagent) and a payload missing both fields must
+    // neither throw nor return anything that could cancel or customize.
+    for (const handler of fake.handlers.get("session_before_compact") ?? []) {
+      expect(await handler({ type: "session_before_compact" }, ctx)).toBeUndefined();
+      expect(await handler(undefined, ctx)).toBeUndefined();
+    }
+    for (const handler of fake.handlers.get("session_compact") ?? []) {
+      expect(await handler({ type: "session_compact" }, ctx)).toBeUndefined();
+    }
+    // The orphan clear must not alter the prompt it rides on.
+    for (const handler of fake.handlers.get("before_agent_start") ?? []) {
+      expect(await handler({ type: "before_agent_start" }, ctx)).toBeUndefined();
+    }
+
+    await emit(fake, "agent_settled", {}, ctx);
+    await flushDeferred();
+    expect(fake.sentMessages).toEqual([]);
+  });
+
   test("should clear scheduled continuations on session_shutdown", async () => {
     writeGlobalConfig({
       enabled: true,

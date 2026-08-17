@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  DEFAULT_COMPACTION_FAILURE_NOTICE_TEXT,
+  DEFAULT_COMPACTION_FAILURE_RESUME_TEXT,
   DEFAULT_CONFIG,
   DEFAULT_CONTEXT_WARNING_TEXT,
   DEFAULT_PAID_NOTICE_TEXT,
@@ -333,6 +335,46 @@ describe("loadConfig", () => {
   test("should ignore a non-array contextWarnings value", () => {
     expect(normalizeConfig({ contextWarnings: { entry: "a/b", aboveTokens: 1 } }).contextWarnings)
       .toEqual([]);
+  });
+
+  test("should default advanceOnCompactionFailure to true and keep the default notice", () => {
+    const home = makeTempDir("mf-config-home-compact-default");
+    setHome(home);
+    const cwd = makeTempDir("mf-config-cwd-compact-default");
+
+    const config = loadConfig(cwd);
+    expect(config.advanceOnCompactionFailure).toBe(true);
+    expect(config.compactionFailureNoticeText).toBe(DEFAULT_COMPACTION_FAILURE_NOTICE_TEXT);
+    expect(config.compactionFailureResumeText).toBe(DEFAULT_COMPACTION_FAILURE_RESUME_TEXT);
+  });
+
+  test("should keep the compaction resume text free of any quota or provider-error claim", () => {
+    expect(DEFAULT_COMPACTION_FAILURE_RESUME_TEXT).not.toMatch(/quota|exhaust|rate limit|error/i);
+    expect(DEFAULT_COMPACTION_FAILURE_RESUME_TEXT).not.toBe(DEFAULT_RESUME_TEXT);
+  });
+
+  test("should honour an explicit advanceOnCompactionFailure=false and a custom notice", () => {
+    const config = normalizeConfig({
+      advanceOnCompactionFailure: false,
+      compactionFailureNoticeText: "compaction died",
+      compactionFailureResumeText: "keep going",
+    });
+
+    expect(config.advanceOnCompactionFailure).toBe(false);
+    expect(config.compactionFailureNoticeText).toBe("compaction died");
+    expect(config.compactionFailureResumeText).toBe("keep going");
+  });
+
+  test("should ignore non-boolean advanceOnCompactionFailure and blank notice text", () => {
+    const config = normalizeConfig({
+      advanceOnCompactionFailure: "false",
+      compactionFailureNoticeText: "   ",
+      compactionFailureResumeText: "   ",
+    });
+
+    expect(config.advanceOnCompactionFailure).toBe(true);
+    expect(config.compactionFailureNoticeText).toBe(DEFAULT_COMPACTION_FAILURE_NOTICE_TEXT);
+    expect(config.compactionFailureResumeText).toBe(DEFAULT_COMPACTION_FAILURE_RESUME_TEXT);
   });
 
   test("findContextWarning should match case-insensitively, keep slash-bearing ids, and miss cleanly", () => {

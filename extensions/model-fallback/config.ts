@@ -22,6 +22,20 @@ export interface ModelFallbackConfig {
    * long-context pricing, neither of which surfaces anywhere else.
    */
   contextWarnings: ContextWarning[];
+  /**
+   * Treat an unresolved overflow compaction as a switch trigger. Pi runs
+   * overflow recovery through a path that emits no extension-visible failure,
+   * so a compaction that dies on an exhausted provider would otherwise stall
+   * the chain forever.
+   */
+  advanceOnCompactionFailure: boolean;
+  compactionFailureNoticeText: string;
+  /**
+   * Continuation text for a compaction-failure switch. Separate from
+   * `resumeText` because that one asserts an exhausted quota, which is a false
+   * premise here — a dead compaction says nothing about why it died.
+   */
+  compactionFailureResumeText: string;
 }
 
 export interface ChainEntry {
@@ -44,6 +58,12 @@ export const DEFAULT_PAID_NOTICE_TEXT =
 export const DEFAULT_CONTEXT_WARNING_TEXT =
   "model-fallback: context exceeds this model's comfortable window — run /compact before continuing or switch to a wider-window model, since auto-compaction on a fresh provider can fail and stall the chain.";
 
+export const DEFAULT_COMPACTION_FAILURE_NOTICE_TEXT =
+  "model-fallback: auto-compaction did not complete on the previous model; advancing the chain because of it.";
+
+export const DEFAULT_COMPACTION_FAILURE_RESUME_TEXT =
+  "Auto-compaction did not complete on the previous model, so the context may be near its limit. Continue the current task from where the previous model stopped; do not redo completed work.";
+
 export const DEFAULT_CONFIG: ModelFallbackConfig = {
   enabled: false,
   orchestratorOnly: true,
@@ -53,6 +73,9 @@ export const DEFAULT_CONFIG: ModelFallbackConfig = {
   paidEntries: [],
   paidNoticeText: DEFAULT_PAID_NOTICE_TEXT,
   contextWarnings: [],
+  advanceOnCompactionFailure: true,
+  compactionFailureNoticeText: DEFAULT_COMPACTION_FAILURE_NOTICE_TEXT,
+  compactionFailureResumeText: DEFAULT_COMPACTION_FAILURE_RESUME_TEXT,
 };
 
 function resolveHomeDir(): string {
@@ -158,6 +181,20 @@ export function normalizeConfig(raw: Record<string, unknown>): ModelFallbackConf
         ? raw.paidNoticeText
         : DEFAULT_CONFIG.paidNoticeText,
     contextWarnings: normalizeContextWarnings(raw.contextWarnings),
+    advanceOnCompactionFailure:
+      typeof raw.advanceOnCompactionFailure === "boolean"
+        ? raw.advanceOnCompactionFailure
+        : DEFAULT_CONFIG.advanceOnCompactionFailure,
+    compactionFailureNoticeText:
+      typeof raw.compactionFailureNoticeText === "string" &&
+      raw.compactionFailureNoticeText.trim().length > 0
+        ? raw.compactionFailureNoticeText
+        : DEFAULT_CONFIG.compactionFailureNoticeText,
+    compactionFailureResumeText:
+      typeof raw.compactionFailureResumeText === "string" &&
+      raw.compactionFailureResumeText.trim().length > 0
+        ? raw.compactionFailureResumeText
+        : DEFAULT_CONFIG.compactionFailureResumeText,
   };
 }
 

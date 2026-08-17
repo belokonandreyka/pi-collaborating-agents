@@ -159,6 +159,56 @@ export default function (pi: ExtensionAPI): void {
     handleAssistantMessage((event as { message?: unknown }).message);
   });
 
+  // Registering a handler is what makes Pi emit `session_before_compact` at
+  // all, and that emission is the only public trace of a compaction attempt —
+  // so this stays registered even when the controller is dormant. It must
+  // never influence compaction: no `cancel`, no supplied summary, nothing
+  // thrown back into Pi's compaction path.
+  pi.on("session_before_compact", (event) => {
+    try {
+      // The pinned peer typings predate `reason` / `willRetry` / `signal`.
+      const record = event as unknown as {
+        reason?: unknown;
+        willRetry?: unknown;
+        signal?: unknown;
+      };
+      const reason = typeof record?.reason === "string" ? record.reason : undefined;
+      const rawSignal = record?.signal;
+      const signal =
+        typeof rawSignal === "object" &&
+        rawSignal !== null &&
+        typeof (rawSignal as { aborted?: unknown }).aborted === "boolean"
+          ? (rawSignal as { aborted: boolean })
+          : undefined;
+      controllerRef.current?.onCompactionStart(reason, record?.willRetry === true, signal);
+    } catch {
+      // ignore
+    }
+    return undefined;
+  });
+
+  // Pi also runs its compaction check before a new user prompt, outside any
+  // agent run, and discards the result. `agent_settled` only fires inside a
+  // run, so such an attempt would otherwise be consumed at the settle of the
+  // next, unrelated turn. This fires after that pre-prompt check and only on
+  // the user-prompt path, so it drops exactly the orphan.
+  pi.on("before_agent_start", () => {
+    try {
+      controllerRef.current?.onCompactionEnd();
+    } catch {
+      // ignore
+    }
+    return undefined;
+  });
+
+  pi.on("session_compact", () => {
+    try {
+      controllerRef.current?.onCompactionEnd();
+    } catch {
+      // ignore
+    }
+  });
+
   (pi as SettledCapableAPI).on("agent_settled", async () => {
     await controllerRef.current?.handleSettled();
   });

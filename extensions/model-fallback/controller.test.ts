@@ -141,6 +141,7 @@ describe("FallbackController", () => {
     expect(outcome.kind).toBe("switched");
     if (outcome.kind === "switched") {
       expect(outcome.to).toEqual({ provider: "github-copilot", id: "claude-opus-4.7" });
+      expect(outcome.trigger).toBe("error");
     }
     expect(harness.setModelCalls.map((m) => `${m.provider}/${m.id}`)).toEqual([
       "github-copilot/claude-opus-4.7",
@@ -522,6 +523,311 @@ describe("FallbackController context warnings", () => {
     expect(warnings(harness)).toEqual([
       "context hazard (openai-codex/gpt-5.6-sol: context ~1.2M > 270k)",
     ]);
+  });
+});
+
+describe("FallbackController compaction failures", () => {
+  const NOTICE = "compaction died";
+  const COMPACTION_RESUME = "compaction-resume-please";
+
+  function makeCompactionHarness(overrides: HarnessOverrides = {}): Harness {
+    return makeHarness({
+      ...overrides,
+      config: {
+        compactionFailureNoticeText: NOTICE,
+        compactionFailureResumeText: COMPACTION_RESUME,
+        ...(overrides.config ?? {}),
+      },
+    });
+  }
+
+  test("should advance the chain when an overflow compaction never reports success", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true);
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome.kind).toBe("switched");
+    if (outcome.kind === "switched") {
+      expect(outcome.to).toEqual({ provider: "github-copilot", id: "claude-opus-4.7" });
+      expect(outcome.trigger).toBe("compaction_failure");
+    }
+    expect(harness.continuations).toHaveLength(1);
+    expect(harness.continuations[0]!.error.classification).toBe("compaction_failure");
+    expect(harness.continuations[0]!.resumeText).toBe(COMPACTION_RESUME);
+    expect(harness.notifications.filter((n) => n.level === "warning").map((n) => n.message)).toEqual([
+      `${NOTICE} (anthropic/claude-opus-4-8 -> github-copilot/claude-opus-4.7)`,
+    ]);
+    // The info line is the only trace of WHICH trigger fired.
+    expect(harness.notifications.filter((n) => n.level === "info").map((n) => n.message)).toEqual([
+      "model-fallback: switched to github-copilot/claude-opus-4.7 (compaction_failure).",
+    ]);
+  });
+
+  test("should carry the plain resumeText on an error-driven switch", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onProviderResponse(429);
+
+    expect((await harness.controller.handleSettled()).kind).toBe("switched");
+
+    expect(harness.continuations[0]!.resumeText).toBe("resume-please");
+  });
+
+  test("should ignore threshold and manual compaction reasons", async () => {
+    for (const reason of ["threshold", "manual", undefined]) {
+      const harness = makeCompactionHarness();
+      harness.controller.onCompactionStart(reason, true);
+
+      const outcome = await harness.controller.handleSettled();
+
+      expect(outcome).toEqual({ kind: "noop", reason: "no_error" });
+      expect(harness.continuations).toEqual([]);
+    }
+  });
+
+  test("should ignore a housekeeping compaction Pi was not going to retry", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", false, { aborted: false });
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome).toEqual({ kind: "noop", reason: "no_error" });
+    expect(harness.setModelCalls).toEqual([]);
+    expect(harness.continuations).toEqual([]);
+    expect(harness.notifications).toEqual([]);
+  });
+
+  test("should drop an attempt orphaned by a successful assistant message", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true);
+    harness.controller.onAssistantMessage("stop", undefined);
+
+    expect(harness.controller.snapshot().compactionPending).toBe(false);
+    expect(await harness.controller.handleSettled()).toEqual({ kind: "noop", reason: "no_error" });
+    expect(harness.continuations).toEqual([]);
+  });
+
+  test("should let the compaction trigger win over a recorded provider error", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onProviderResponse(500);
+    harness.controller.onAssistantMessage("error", "internal server error");
+    harness.controller.onCompactionStart("overflow", true);
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome).toEqual({
+      kind: "switched",
+      to: { provider: "github-copilot", id: "claude-opus-4.7" },
+      trigger: "compaction_failure",
+    });
+    // The stale 500 must not ride along as the cause of the switch.
+    expect(harness.continuations).toHaveLength(1);
+    expect(harness.continuations[0]).toEqual({
+      previousModel: { provider: "anthropic", id: "claude-opus-4-8" },
+      nextModel: { provider: "github-copilot", id: "claude-opus-4.7" },
+      error: { classification: "compaction_failure" },
+      resumeText: COMPACTION_RESUME,
+    });
+    expect("status" in harness.continuations[0]!.error).toBe(false);
+    expect("message" in harness.continuations[0]!.error).toBe(false);
+  });
+
+  test("should report not-in-chain when the current model is outside the chain", async () => {
+    const harness = makeCompactionHarness({
+      current: { provider: "openrouter", id: "unlisted" },
+    });
+    harness.controller.onCompactionStart("overflow", true);
+
+    expect(await harness.controller.handleSettled()).toEqual({ kind: "not-in-chain" });
+    expect(harness.continuations).toEqual([]);
+    expect(harness.notifications).toEqual([]);
+  });
+
+  test("should not advance when the attempt was resolved by a successful compaction", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true);
+    harness.controller.onCompactionEnd();
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome).toEqual({ kind: "noop", reason: "no_error" });
+    expect(harness.continuations).toEqual([]);
+  });
+
+  test("should be fully inert when advanceOnCompactionFailure is false", async () => {
+    const harness = makeCompactionHarness({ config: { advanceOnCompactionFailure: false } });
+    harness.controller.onCompactionStart("overflow", true);
+
+    expect(harness.controller.snapshot().compactionPending).toBe(false);
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome).toEqual({ kind: "noop", reason: "no_error" });
+    expect(harness.continuations).toEqual([]);
+    expect(harness.notifications).toEqual([]);
+  });
+
+  test("should not advance when the user aborted the turn", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true);
+    harness.controller.onAssistantMessage("aborted", undefined);
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome).toEqual({ kind: "noop", reason: "no_error" });
+    expect(harness.continuations).toEqual([]);
+  });
+
+  test("should not advance when the compaction's abort signal reports a cancel", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true, { aborted: true });
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome).toEqual({ kind: "noop", reason: "no_error" });
+    expect(harness.continuations).toEqual([]);
+    expect(harness.notifications).toEqual([]);
+  });
+
+  test("should advance when the abort signal reports the compaction was not cancelled", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true, { aborted: false });
+
+    expect((await harness.controller.handleSettled()).kind).toBe("switched");
+    expect(harness.continuations).toHaveLength(1);
+  });
+
+  test("should still advance when the event carried no abort signal", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true, undefined);
+
+    expect((await harness.controller.handleSettled()).kind).toBe("switched");
+    expect(harness.continuations).toHaveLength(1);
+  });
+
+  test("should treat a malformed abort signal as not cancelled without throwing", async () => {
+    const malformed = [
+      {},
+      { aborted: "yes" },
+      Object.defineProperty({}, "aborted", {
+        get() {
+          throw new Error("boom");
+        },
+      }),
+    ];
+    for (const signal of malformed) {
+      const harness = makeCompactionHarness();
+      harness.controller.onCompactionStart("overflow", true, signal as never);
+
+      expect((await harness.controller.handleSettled()).kind).toBe("switched");
+      expect(harness.continuations).toHaveLength(1);
+    }
+  });
+
+  test("should advance again after an abort is followed by a fresh overflow attempt", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onAssistantMessage("aborted", undefined);
+    harness.controller.onAssistantMessage("stop", undefined);
+    harness.controller.onCompactionStart("overflow", true);
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome.kind).toBe("switched");
+  });
+
+  test("should replace an unresolved attempt with a later one and act only once", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true);
+    harness.controller.onCompactionStart("manual", true);
+
+    // The replacement is a manual compaction, so nothing may fire.
+    expect(await harness.controller.handleSettled()).toEqual({ kind: "noop", reason: "no_error" });
+
+    harness.controller.onCompactionStart("overflow", true);
+    expect((await harness.controller.handleSettled()).kind).toBe("switched");
+    // The attempt was consumed by the switch; a second settle must be a no-op.
+    expect(await harness.controller.handleSettled()).toEqual({ kind: "noop", reason: "no_error" });
+    expect(harness.continuations).toHaveLength(1);
+  });
+
+  test("should clear a pending attempt on reset", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onCompactionStart("overflow", true);
+    expect(harness.controller.snapshot().compactionPending).toBe(true);
+
+    harness.controller.reset();
+
+    expect(harness.controller.snapshot().compactionPending).toBe(false);
+    expect(await harness.controller.handleSettled()).toEqual({ kind: "noop", reason: "no_error" });
+  });
+
+  test("should skip unavailable entries and still emit the paid and context notices", async () => {
+    const harness = makeCompactionHarness({
+      current: { provider: "github-copilot", id: "claude-opus-4.7" },
+      getContextTokens: () => 330000,
+      registered: {
+        "github-copilot/claude-opus-4.7": true,
+        "openrouter/skipped-unregistered": false,
+        "anthropic/unauthorized": true,
+        "openai-codex/gpt-5.6-sol": true,
+      },
+      authorized: { "anthropic/unauthorized": false },
+      config: {
+        notifyUser: false,
+        chain: [
+          { provider: "github-copilot", id: "claude-opus-4.7" },
+          { provider: "openrouter", id: "skipped-unregistered" },
+          { provider: "anthropic", id: "unauthorized" },
+          { provider: "openai-codex", id: "gpt-5.6-sol" },
+        ],
+        paidEntries: [{ provider: "openai-codex", id: "gpt-5.6-sol" }],
+        paidNoticeText: "ALL LIMITS EXHAUSTED",
+        contextWarnings: [
+          {
+            entry: { provider: "openai-codex", id: "gpt-5.6-sol" },
+            aboveTokens: 270000,
+            text: "context hazard",
+          },
+        ],
+      },
+    });
+    harness.controller.onCompactionStart("overflow", true);
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome.kind).toBe("switched");
+    if (outcome.kind === "switched") {
+      expect(outcome.to).toEqual({ provider: "openai-codex", id: "gpt-5.6-sol" });
+    }
+    // notifyUser=false silences the skip lines but not the three hazard notices.
+    expect(harness.notifications.map((n) => n.message)).toEqual([
+      `${NOTICE} (github-copilot/claude-opus-4.7 -> openai-codex/gpt-5.6-sol)`,
+      "ALL LIMITS EXHAUSTED (openai-codex/gpt-5.6-sol)",
+      "context hazard (openai-codex/gpt-5.6-sol: context ~330k > 270k)",
+    ]);
+    expect(harness.callOrder).toEqual([
+      "notify:warning",
+      "notify:error",
+      "notify:warning",
+      "continuation",
+    ]);
+  });
+
+  test("should report chain exhaustion instead of switching at the tail of the chain", async () => {
+    const harness = makeCompactionHarness({
+      current: { provider: "openai-codex", id: "gpt-5.6-sol" },
+    });
+    harness.controller.onCompactionStart("overflow", true);
+
+    expect(await harness.controller.handleSettled()).toEqual({ kind: "chain-exhausted" });
+    expect(harness.continuations).toEqual([]);
+  });
+
+  test("should stay dormant when the extension is disabled", async () => {
+    const harness = makeCompactionHarness({ config: { enabled: false } });
+    harness.controller.onCompactionStart("overflow", true);
+
+    expect(await harness.controller.handleSettled()).toEqual({ kind: "noop", reason: "disabled" });
+    expect(harness.continuations).toEqual([]);
   });
 });
 
