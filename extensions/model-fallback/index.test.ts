@@ -104,6 +104,49 @@ function writeGlobalConfig(config: unknown): void {
   fs.writeFileSync(path.join(dir, "model-fallback.json"), JSON.stringify(config), "utf-8");
 }
 
+// Drives a full 429 -> switch cycle onto an entry that has a contextWarning,
+// returning the notifications so each `getContextUsage` shape can be asserted
+// against the same otherwise-identical scenario.
+async function runContextWarningScenario(
+  getContextUsage: () => unknown,
+): Promise<Array<{ message: string; level: string }>> {
+  writeGlobalConfig({
+    enabled: true,
+    chain: ["anthropic/opus", "openai-codex/gpt-5.6-sol"],
+    orchestratorOnly: true,
+    contextWarnings: [{ entry: "openai-codex/gpt-5.6-sol", aboveTokens: 270000, text: "ctx" }],
+  });
+  const fake = makeFakeAPI();
+  factory(toPiApi(fake));
+
+  const notifications: Array<{ message: string; level: string }> = [];
+  const ctx = {
+    cwd: process.cwd(),
+    model: { provider: "anthropic", id: "opus" },
+    modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+    getContextUsage,
+    ui: {
+      notify: (message: string, level: string) => {
+        notifications.push({ message, level });
+      },
+    },
+  };
+
+  await emit(fake, "session_start", { reason: "startup" }, ctx);
+  await emit(fake, "after_provider_response", { status: 429, headers: {} }, ctx);
+  await emit(
+    fake,
+    "message_end",
+    { message: { role: "assistant", stopReason: "error", errorMessage: "rate limit" } },
+    ctx,
+  );
+  await emit(fake, "agent_settled", {}, ctx);
+  await flushDeferred();
+
+  expect(fake.sentMessages).toHaveLength(1);
+  return notifications;
+}
+
 describe("model-fallback extension entry", () => {
   test("should stay dormant in a subagent when orchestratorOnly is true even though handlers are registered", async () => {
     writeGlobalConfig({ enabled: true, chain: ["a/b", "c/d"], orchestratorOnly: true });
@@ -197,6 +240,35 @@ describe("model-fallback extension entry", () => {
     expect(sent.message.details.previousModel).toEqual({ provider: "anthropic", id: "opus" });
     expect(sent.message.details.nextModel).toEqual({ provider: "github-copilot", id: "claude" });
     expect(sent.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+  });
+
+  test("should read the context size from getContextUsage so warnings can fire", async () => {
+    const notifications = await runContextWarningScenario(() => ({
+      tokens: 330000,
+      contextWindow: 1_000_000,
+      percent: 33,
+    }));
+
+    expect(notifications.filter((n) => n.level === "warning").map((n) => n.message)).toEqual([
+      "ctx (openai-codex/gpt-5.6-sol: context ~330k > 270k)",
+    ]);
+  });
+
+  test("should stay silent when getContextUsage reports an unknown size or throws", async () => {
+    const postCompaction = await runContextWarningScenario(() => ({
+      tokens: null,
+      contextWindow: 1_000_000,
+      percent: null,
+    }));
+    expect(postCompaction.filter((n) => n.message.startsWith("ctx"))).toEqual([]);
+
+    const absent = await runContextWarningScenario(() => undefined);
+    expect(absent.filter((n) => n.message.startsWith("ctx"))).toEqual([]);
+
+    const thrown = await runContextWarningScenario(() => {
+      throw new Error("session is not active");
+    });
+    expect(thrown.filter((n) => n.message.startsWith("ctx"))).toEqual([]);
   });
 
   test("should skip a chain entry when setModel returns false", async () => {

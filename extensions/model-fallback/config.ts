@@ -15,6 +15,13 @@ export interface ModelFallbackConfig {
    */
   paidEntries: ChainEntry[];
   paidNoticeText: string;
+  /**
+   * Per-entry context-size hazards. Switching onto one of these while the
+   * observed context exceeds `aboveTokens` emits a warning — a fresh provider
+   * with a smaller (or overridden) window silently triggers auto-compaction or
+   * long-context pricing, neither of which surfaces anywhere else.
+   */
+  contextWarnings: ContextWarning[];
 }
 
 export interface ChainEntry {
@@ -22,11 +29,20 @@ export interface ChainEntry {
   id: string;
 }
 
+export interface ContextWarning {
+  entry: ChainEntry;
+  aboveTokens: number;
+  text: string;
+}
+
 export const DEFAULT_RESUME_TEXT =
   "The previous provider exhausted its quota. Continue the current task from where it stopped; do not redo completed work.";
 
 export const DEFAULT_PAID_NOTICE_TEXT =
   "\u0412\u0421\u0406 \u041b\u0406\u041c\u0406\u0422\u0418 \u0412\u0418\u0427\u0415\u0420\u041f\u0410\u041d\u0406 \u2014 \u043f\u0440\u0430\u0446\u044e\u0454\u043c\u043e \u043d\u0430 \u043f\u043b\u0430\u0442\u043d\u0456\u0439 \u043e\u0441\u043d\u043e\u0432\u0456";
+
+export const DEFAULT_CONTEXT_WARNING_TEXT =
+  "model-fallback: context exceeds this model's comfortable window — run /compact before continuing or switch to a wider-window model, since auto-compaction on a fresh provider can fail and stall the chain.";
 
 export const DEFAULT_CONFIG: ModelFallbackConfig = {
   enabled: false,
@@ -36,6 +52,7 @@ export const DEFAULT_CONFIG: ModelFallbackConfig = {
   notifyUser: true,
   paidEntries: [],
   paidNoticeText: DEFAULT_PAID_NOTICE_TEXT,
+  contextWarnings: [],
 };
 
 function resolveHomeDir(): string {
@@ -88,6 +105,27 @@ function normalizeChain(raw: unknown): ChainEntry[] {
   return out;
 }
 
+function normalizeContextWarnings(raw: unknown): ContextWarning[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ContextWarning[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const entry = parseChainEntry(record.entry);
+    if (!entry) continue;
+    const aboveTokens = record.aboveTokens;
+    if (typeof aboveTokens !== "number" || !Number.isFinite(aboveTokens) || aboveTokens <= 0) {
+      continue;
+    }
+    const text =
+      typeof record.text === "string" && record.text.trim().length > 0
+        ? record.text
+        : DEFAULT_CONTEXT_WARNING_TEXT;
+    out.push({ entry, aboveTokens, text });
+  }
+  return out;
+}
+
 function mergeRaw(
   ...sources: Array<Record<string, unknown> | null>
 ): Record<string, unknown> {
@@ -119,6 +157,7 @@ export function normalizeConfig(raw: Record<string, unknown>): ModelFallbackConf
       typeof raw.paidNoticeText === "string" && raw.paidNoticeText.trim().length > 0
         ? raw.paidNoticeText
         : DEFAULT_CONFIG.paidNoticeText,
+    contextWarnings: normalizeContextWarnings(raw.contextWarnings),
   };
 }
 
@@ -128,6 +167,18 @@ export function isPaidEntry(config: ModelFallbackConfig, entry: ChainEntry): boo
     (paid) =>
       paid.provider.toLowerCase() === entry.provider.toLowerCase() &&
       paid.id.toLowerCase() === entry.id.toLowerCase(),
+  );
+}
+
+/** Case-insensitive lookup; the first configured match for an entry wins. */
+export function findContextWarning(
+  config: ModelFallbackConfig,
+  entry: ChainEntry,
+): ContextWarning | undefined {
+  return config.contextWarnings.find(
+    (warning) =>
+      warning.entry.provider.toLowerCase() === entry.provider.toLowerCase() &&
+      warning.entry.id.toLowerCase() === entry.id.toLowerCase(),
   );
 }
 

@@ -1,5 +1,10 @@
 import { classifyError, type FallbackClassification } from "./classify.ts";
-import { isPaidEntry, type ChainEntry, type ModelFallbackConfig } from "./config.ts";
+import {
+  findContextWarning,
+  isPaidEntry,
+  type ChainEntry,
+  type ModelFallbackConfig,
+} from "./config.ts";
 
 export interface ControllerModelRef {
   provider: string;
@@ -17,6 +22,8 @@ export interface ControllerDeps {
   setModel: (model: ResolvedModel) => Promise<boolean>;
   sendContinuation: (payload: ContinuationPayload) => Promise<void>;
   notify: (message: string, level: "info" | "warning" | "error") => void;
+  /** Live context size, or `undefined` when Pi cannot report a trustworthy one. */
+  getContextTokens: () => number | undefined;
 }
 
 export interface ContinuationPayload {
@@ -29,6 +36,13 @@ export interface ContinuationPayload {
 export interface RecordedError {
   status?: number;
   errorMessage?: string;
+}
+
+export function formatTokens(tokens: number): string {
+  // 999_500+ rounds to 1000k, which reads as a wrong unit — promote to M.
+  if (tokens >= 999_500) return `${(tokens / 1_000_000).toFixed(2).replace(/\.?0+$/, "")}M`;
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
+  return String(tokens);
 }
 
 export type SettleOutcome =
@@ -141,6 +155,35 @@ export class FallbackController {
           classification: classification.reason,
         };
 
+        // Billing notice is deliberately outside the notifyUser guard: muting
+        // routine switch chatter must not also mute "you are now paying".
+        if (isPaidEntry(this.deps.config, nextModel)) {
+          this.deps.notify(
+            `${this.deps.config.paidNoticeText} (${resolved.provider}/${resolved.id})`,
+            "error",
+          );
+        }
+
+        // Same rationale as the billing notice: a context hazard on the target
+        // provider is not routine switch chatter. Silent when Pi cannot report
+        // a trustworthy size — guessing would be worse than mute.
+        const contextWarning = findContextWarning(this.deps.config, nextModel);
+        // Reading the size walks the message list, so only pay for it when an
+        // entry actually has a threshold configured.
+        const contextTokens = contextWarning ? this.deps.getContextTokens() : undefined;
+        if (
+          contextWarning &&
+          contextTokens !== undefined &&
+          contextTokens > contextWarning.aboveTokens
+        ) {
+          this.deps.notify(
+            `${contextWarning.text} (${resolved.provider}/${resolved.id}: context ~${formatTokens(
+              contextTokens,
+            )} > ${formatTokens(contextWarning.aboveTokens)})`,
+            "warning",
+          );
+        }
+
         await this.deps.sendContinuation({
           previousModel,
           nextModel,
@@ -152,15 +195,6 @@ export class FallbackController {
           this.deps.notify(
             `model-fallback: switched to ${resolved.provider}/${resolved.id} (${classification.reason}).`,
             "info",
-          );
-        }
-
-        // Billing notice is deliberately outside the notifyUser guard: muting
-        // routine switch chatter must not also mute "you are now paying".
-        if (isPaidEntry(this.deps.config, nextModel)) {
-          this.deps.notify(
-            `${this.deps.config.paidNoticeText} (${resolved.provider}/${resolved.id})`,
-            "error",
           );
         }
 
@@ -184,7 +218,12 @@ export class FallbackController {
     }
   }
 
-  snapshot(): { status?: number; errorMessage?: string; switching: boolean; exhausted: boolean } {
+  snapshot(): {
+    status?: number;
+    errorMessage?: string;
+    switching: boolean;
+    exhausted: boolean;
+  } {
     return {
       status: this.lastStatus,
       errorMessage: this.lastErrorMessage,

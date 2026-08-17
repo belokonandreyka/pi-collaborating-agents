@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   FallbackController,
+  formatTokens,
   type ContinuationPayload,
   type ControllerDeps,
   type ControllerModelRef,
@@ -14,6 +15,9 @@ interface Harness {
   continuations: ContinuationPayload[];
   setModelCalls: ResolvedModel[];
   findCalls: ChainEntry[];
+  /** Interleaved log of notify/continuation calls, for ordering assertions. */
+  callOrder: string[];
+  contextTokensCalls: number;
 }
 
 interface HarnessOverrides {
@@ -21,6 +25,7 @@ interface HarnessOverrides {
   current?: ControllerModelRef | undefined;
   registered?: Record<string, boolean>;
   authorized?: Record<string, boolean>;
+  getContextTokens?: () => number | undefined;
 }
 
 function key(entry: ChainEntry | ControllerModelRef): string {
@@ -56,6 +61,8 @@ function makeHarness(overrides: HarnessOverrides = {}): Harness {
   const continuations: ContinuationPayload[] = [];
   const setModelCalls: ResolvedModel[] = [];
   const findCalls: ChainEntry[] = [];
+  const callOrder: string[] = [];
+  const counters = { contextTokens: 0 };
 
   const deps: ControllerDeps = {
     config,
@@ -75,19 +82,30 @@ function makeHarness(overrides: HarnessOverrides = {}): Harness {
     },
     sendContinuation: async (payload) => {
       continuations.push(payload);
+      callOrder.push("continuation");
     },
     notify: (message, level) => {
       notifications.push({ message, level });
+      callOrder.push(`notify:${level}`);
+    },
+    getContextTokens: () => {
+      counters.contextTokens++;
+      return overrides.getContextTokens?.();
     },
   };
 
-  return {
+  const harness: Harness = {
     controller: new FallbackController(deps),
     notifications,
     continuations,
     setModelCalls,
     findCalls,
+    callOrder,
+    get contextTokensCalls() {
+      return counters.contextTokens;
+    },
   };
+  return harness;
 }
 
 describe("FallbackController", () => {
@@ -289,5 +307,236 @@ describe("FallbackController", () => {
     // silence the billing warning.
     expect(harness.notifications.filter((n) => n.level === "info")).toEqual([]);
     expect(harness.notifications.filter((n) => n.level === "error")).toHaveLength(1);
+  });
+});
+
+describe("FallbackController context warnings", () => {
+  const CONTEXT_WARNING = {
+    entry: { provider: "openai-codex", id: "gpt-5.6-sol" },
+    aboveTokens: 270000,
+    text: "context hazard",
+  };
+
+  function makeContextHarness(overrides: HarnessOverrides = {}): Harness {
+    return makeHarness({
+      current: { provider: "github-copilot", id: "claude-opus-4.7" },
+      getContextTokens: () => 330000,
+      ...overrides,
+      config: {
+        chain: [
+          { provider: "github-copilot", id: "claude-opus-4.7" },
+          { provider: "openai-codex", id: "gpt-5.6-sol" },
+        ],
+        contextWarnings: [CONTEXT_WARNING],
+        ...(overrides.config ?? {}),
+      },
+    });
+  }
+
+  function warnings(harness: Harness): string[] {
+    return harness.notifications.filter((n) => n.level === "warning").map((n) => n.message);
+  }
+
+  test("should warn when the context exceeds the target entry's threshold", async () => {
+    const harness = makeContextHarness();
+    harness.controller.onProviderResponse(429);
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome.kind).toBe("switched");
+    expect(warnings(harness)).toEqual([
+      "context hazard (openai-codex/gpt-5.6-sol: context ~330k > 270k)",
+    ]);
+  });
+
+  test("should stay silent when Pi cannot report a trustworthy context size", async () => {
+    const harness = makeContextHarness({ getContextTokens: () => undefined });
+    harness.controller.onProviderResponse(429);
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome.kind).toBe("switched");
+    expect(warnings(harness)).toEqual([]);
+  });
+
+  test("should not warn when the context is exactly at the threshold", async () => {
+    const harness = makeContextHarness({ getContextTokens: () => 270000 });
+    harness.controller.onProviderResponse(429);
+
+    await harness.controller.handleSettled();
+
+    expect(warnings(harness)).toEqual([]);
+  });
+
+  test("should not warn when the context is below the threshold", async () => {
+    const harness = makeContextHarness({ getContextTokens: () => 269999 });
+    harness.controller.onProviderResponse(429);
+
+    await harness.controller.handleSettled();
+
+    expect(warnings(harness)).toEqual([]);
+  });
+
+  test("should warn one token above the threshold", async () => {
+    const harness = makeContextHarness({ getContextTokens: () => 270001 });
+    harness.controller.onProviderResponse(429);
+
+    await harness.controller.handleSettled();
+
+    expect(warnings(harness)).toEqual([
+      "context hazard (openai-codex/gpt-5.6-sol: context ~270k > 270k)",
+    ]);
+  });
+
+  test("should not warn when no warning is configured for the target entry", async () => {
+    const harness = makeContextHarness({
+      getContextTokens: () => 900000,
+      config: {
+        contextWarnings: [
+          {
+            entry: { provider: "openrouter", id: "google/gemini-3.7-flash" },
+            aboveTokens: 10,
+            text: "context hazard",
+          },
+        ],
+      },
+    });
+    harness.controller.onProviderResponse(429);
+
+    await harness.controller.handleSettled();
+
+    expect(warnings(harness)).toEqual([]);
+  });
+
+  test("should still warn when routine switch chatter is muted", async () => {
+    const harness = makeContextHarness({ config: { notifyUser: false } });
+    harness.controller.onProviderResponse(429);
+
+    await harness.controller.handleSettled();
+
+    expect(harness.notifications.filter((n) => n.level === "info")).toEqual([]);
+    expect(warnings(harness)).toEqual([
+      "context hazard (openai-codex/gpt-5.6-sol: context ~330k > 270k)",
+    ]);
+  });
+
+  test("should name the entry actually switched to when earlier chain entries are skipped", async () => {
+    const harness = makeHarness({
+      current: { provider: "github-copilot", id: "claude-opus-4.7" },
+      getContextTokens: () => 330000,
+      registered: {
+        "github-copilot/claude-opus-4.7": true,
+        "openrouter/skipped-unregistered": false,
+        "anthropic/unauthorized": true,
+        "openai-codex/gpt-5.6-sol": true,
+      },
+      authorized: { "anthropic/unauthorized": false },
+      config: {
+        chain: [
+          { provider: "github-copilot", id: "claude-opus-4.7" },
+          { provider: "openrouter", id: "skipped-unregistered" },
+          { provider: "anthropic", id: "unauthorized" },
+          { provider: "openai-codex", id: "gpt-5.6-sol" },
+        ],
+        contextWarnings: [
+          { entry: { provider: "anthropic", id: "unauthorized" }, aboveTokens: 10, text: "wrong hazard" },
+          CONTEXT_WARNING,
+        ],
+      },
+    });
+    harness.controller.onProviderResponse(429);
+
+    const outcome = await harness.controller.handleSettled();
+
+    expect(outcome.kind).toBe("switched");
+    if (outcome.kind === "switched") {
+      expect(outcome.to).toEqual({ provider: "openai-codex", id: "gpt-5.6-sol" });
+    }
+    expect(warnings(harness)).toEqual([
+      "model-fallback: openrouter/skipped-unregistered not registered; skipping.",
+      "model-fallback: anthropic/unauthorized unavailable (no auth); skipping.",
+      "context hazard (openai-codex/gpt-5.6-sol: context ~330k > 270k)",
+    ]);
+  });
+
+  test("should re-read the context size on every switch rather than caching it", async () => {
+    const sizes: Array<number | undefined> = [330000, undefined];
+    const harness = makeHarness({
+      current: { provider: "github-copilot", id: "claude-opus-4.7" },
+      getContextTokens: () => sizes.shift(),
+      config: {
+        chain: [
+          { provider: "github-copilot", id: "claude-opus-4.7" },
+          { provider: "openai-codex", id: "gpt-5.6-sol" },
+          { provider: "openrouter", id: "google/gemini-3.7-flash" },
+        ],
+        contextWarnings: [
+          CONTEXT_WARNING,
+          {
+            entry: { provider: "openrouter", id: "google/gemini-3.7-flash" },
+            aboveTokens: 1000,
+            text: "second hazard",
+          },
+        ],
+      },
+      registered: {
+        "github-copilot/claude-opus-4.7": true,
+        "openai-codex/gpt-5.6-sol": true,
+        "openrouter/google/gemini-3.7-flash": true,
+      },
+    });
+
+    harness.controller.onProviderResponse(429);
+    await harness.controller.handleSettled();
+
+    harness.controller.onProviderResponse(429);
+    await harness.controller.handleSettled();
+
+    expect(harness.continuations).toHaveLength(2);
+    expect(harness.contextTokensCalls).toBe(2);
+    // The second switch saw `undefined`, so no "second hazard" line.
+    expect(warnings(harness)).toEqual([
+      "context hazard (openai-codex/gpt-5.6-sol: context ~330k > 270k)",
+    ]);
+  });
+
+  test("should emit both hazard notices before the continuation is dispatched", async () => {
+    const harness = makeContextHarness({
+      config: {
+        paidEntries: [{ provider: "openai-codex", id: "gpt-5.6-sol" }],
+        paidNoticeText: "ALL LIMITS EXHAUSTED",
+      },
+      getContextTokens: () => 1_200_000,
+    });
+    harness.controller.onProviderResponse(429);
+
+    await harness.controller.handleSettled();
+
+    expect(harness.callOrder).toEqual([
+      "notify:error",
+      "notify:warning",
+      "continuation",
+      "notify:info",
+    ]);
+    expect(harness.notifications.filter((n) => n.level === "error")).toHaveLength(1);
+    expect(warnings(harness)).toEqual([
+      "context hazard (openai-codex/gpt-5.6-sol: context ~1.2M > 270k)",
+    ]);
+  });
+});
+
+describe("formatTokens", () => {
+  test("should render each rounding band without a wrong-unit reading", () => {
+    expect(formatTokens(999)).toBe("999");
+    expect(formatTokens(1_000)).toBe("1k");
+    expect(formatTokens(270_000)).toBe("270k");
+    expect(formatTokens(330_000)).toBe("330k");
+    expect(formatTokens(999_499)).toBe("999k");
+    expect(formatTokens(999_500)).toBe("1M");
+    expect(formatTokens(999_999)).toBe("1M");
+    expect(formatTokens(1_000_000)).toBe("1M");
+    expect(formatTokens(1_050_000)).toBe("1.05M");
+    expect(formatTokens(1_200_000)).toBe("1.2M");
+    expect(formatTokens(10_000_000)).toBe("10M");
   });
 });

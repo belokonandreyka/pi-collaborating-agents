@@ -4,8 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   DEFAULT_CONFIG,
+  DEFAULT_CONTEXT_WARNING_TEXT,
   DEFAULT_PAID_NOTICE_TEXT,
   DEFAULT_RESUME_TEXT,
+  findContextWarning,
   isPaidEntry,
   loadConfig,
   normalizeConfig,
@@ -263,5 +265,90 @@ describe("loadConfig", () => {
       true,
     );
     expect(isPaidEntry(config, { provider: "openai-codex", id: "gpt-5.6-sol" })).toBe(false);
+  });
+
+  test("should default contextWarnings to an empty array", () => {
+    const home = makeTempDir("mf-config-home-ctxwarn-default");
+    setHome(home);
+    const cwd = makeTempDir("mf-config-cwd-ctxwarn-default");
+
+    expect(loadConfig(cwd).contextWarnings).toEqual([]);
+  });
+
+  test("should parse contextWarnings and keep a custom text", () => {
+    const config = normalizeConfig({
+      contextWarnings: [
+        { entry: "openai-codex/gpt-5.6-sol", aboveTokens: 270000 },
+        { entry: "openrouter/google/gemini-3.7-flash", aboveTokens: 900000, text: "careful" },
+      ],
+    });
+
+    expect(config.contextWarnings).toEqual([
+      {
+        entry: { provider: "openai-codex", id: "gpt-5.6-sol" },
+        aboveTokens: 270000,
+        text: DEFAULT_CONTEXT_WARNING_TEXT,
+      },
+      {
+        entry: { provider: "openrouter", id: "google/gemini-3.7-flash" },
+        aboveTokens: 900000,
+        text: "careful",
+      },
+    ]);
+  });
+
+  test("should fall back to the default text when contextWarnings text is blank", () => {
+    const config = normalizeConfig({
+      contextWarnings: [{ entry: "openai-codex/gpt-5.6-sol", aboveTokens: 1, text: "   " }],
+    });
+
+    expect(config.contextWarnings[0]!.text).toBe(DEFAULT_CONTEXT_WARNING_TEXT);
+  });
+
+  test("should drop malformed contextWarnings items and keep the valid ones", () => {
+    const config = normalizeConfig({
+      contextWarnings: [
+        { entry: "no-slash", aboveTokens: 100 },
+        { entry: "openai-codex/gpt-5.6-sol" },
+        { entry: "openai-codex/gpt-5.6-sol", aboveTokens: 0 },
+        { entry: "openai-codex/gpt-5.6-sol", aboveTokens: -5 },
+        { entry: "openai-codex/gpt-5.6-sol", aboveTokens: Number.NaN },
+        { entry: "openai-codex/gpt-5.6-sol", aboveTokens: "270000" },
+        { aboveTokens: 100 },
+        "not-an-object",
+        null,
+        { entry: "anthropic/claude-opus-4-8", aboveTokens: 150000 },
+      ],
+    });
+
+    expect(config.contextWarnings).toEqual([
+      {
+        entry: { provider: "anthropic", id: "claude-opus-4-8" },
+        aboveTokens: 150000,
+        text: DEFAULT_CONTEXT_WARNING_TEXT,
+      },
+    ]);
+  });
+
+  test("should ignore a non-array contextWarnings value", () => {
+    expect(normalizeConfig({ contextWarnings: { entry: "a/b", aboveTokens: 1 } }).contextWarnings)
+      .toEqual([]);
+  });
+
+  test("findContextWarning should match case-insensitively, keep slash-bearing ids, and miss cleanly", () => {
+    const config = normalizeConfig({
+      contextWarnings: [
+        { entry: "OpenRouter/Google/Gemini-3.7-Flash", aboveTokens: 900000, text: "first" },
+        { entry: "openrouter/google/gemini-3.7-flash", aboveTokens: 100, text: "second" },
+      ],
+    });
+
+    const hit = findContextWarning(config, {
+      provider: "OPENROUTER",
+      id: "google/GEMINI-3.7-flash",
+    });
+    // First configured match wins even when a later item also matches.
+    expect(hit?.text).toBe("first");
+    expect(findContextWarning(config, { provider: "openai-codex", id: "gpt-5.6-sol" })).toBeUndefined();
   });
 });

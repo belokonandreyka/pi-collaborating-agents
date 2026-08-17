@@ -34,8 +34,15 @@ export default function (pi: ExtensionAPI): void {
   const controllerRef: { current: FallbackController | undefined } = { current: undefined };
   const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
 
+  // A throwing host notify would abort handleSettled before the continuation is
+  // scheduled, i.e. cosmetics would stall the chain. Swallow it at the one place
+  // every call site funnels through.
   const notify = (message: string, level: "info" | "warning" | "error", ctx?: ExtensionContext) => {
-    ctx?.ui?.notify?.(message, level);
+    try {
+      ctx?.ui?.notify?.(message, level);
+    } catch {
+      // ignore
+    }
   };
 
   const buildController = (config: ModelFallbackConfig, ctx: ExtensionContext): FallbackController =>
@@ -85,6 +92,22 @@ export default function (pi: ExtensionAPI): void {
         pendingTimers.add(timer);
       },
       notify: (message, level) => notify(message, level, ctx),
+      // `getContextUsage` reports `tokens: null` when a compaction happened and
+      // no valid post-compaction usage exists yet; both that and `undefined`
+      // mean "unknown", never "zero". The accessor asserts an active runtime,
+      // so a torn-down session must not throw into the settle path.
+      getContextTokens: () => {
+        try {
+          const usage = ctx.getContextUsage();
+          const tokens = usage?.tokens;
+          if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) {
+            return undefined;
+          }
+          return tokens;
+        } catch {
+          return undefined;
+        }
+      },
     });
 
   const clearPendingTimers = (): void => {
@@ -118,7 +141,11 @@ export default function (pi: ExtensionAPI): void {
 
   const handleAssistantMessage = (message: unknown) => {
     if (!message || typeof message !== "object") return;
-    const asRecord = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown };
+    const asRecord = message as {
+      role?: unknown;
+      stopReason?: unknown;
+      errorMessage?: unknown;
+    };
     if (asRecord.role !== "assistant") return;
     const stopReason = typeof asRecord.stopReason === "string" ? asRecord.stopReason : undefined;
     const errorMessage = typeof asRecord.errorMessage === "string" ? asRecord.errorMessage : undefined;

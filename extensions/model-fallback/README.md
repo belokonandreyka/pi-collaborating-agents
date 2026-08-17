@@ -67,6 +67,24 @@ overrides follow `/resume` and session switches correctly.
 | `chain`            | `string[]`            | `[]`     | Ordered chain entries as `"<provider>/<model-id>"`. First matching entry is the anchor. |
 | `resumeText`       | `string`              | built-in | Text of the injected continuation message.                                     |
 | `notifyUser`       | `boolean`             | `true`   | Emit UI notifications on switch / skip / exhaustion.                           |
+| `contextWarnings`  | `object[]`            | `[]`     | Per-entry context-size hazards; see below.                                     |
+
+### `contextWarnings`
+
+Each item is `{ "entry": "<provider>/<model-id>", "aboveTokens": <number>, "text": "<optional>" }`.
+When the chain switches onto `entry` and the context size Pi reports is
+strictly above `aboveTokens`, a warning naming the model, the observed context
+and the threshold is emitted — the case where a fallback provider's window is
+smaller than the current context (auto-compaction) or where the request lands
+in a long-context pricing tier. Like the billing notice, it ignores
+`notifyUser: false`; it stays silent whenever Pi cannot report a trustworthy
+context size (e.g. right after a compaction).
+
+```json
+{
+  "contextWarnings": [{ "entry": "openai-codex/gpt-5.6-sol", "aboveTokens": 270000 }]
+}
+```
 
 ### Concrete chain (recommended)
 
