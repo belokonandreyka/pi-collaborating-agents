@@ -88,6 +88,14 @@ export const DEFAULT_SUBAGENT_TOOLS = ["read", "write", "edit", "bash", "agent_m
 const LOCAL_COLLABORATING_AGENTS_EXTENSION = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const HOME_COLLABORATING_AGENTS_EXTENSION = path.join(os.homedir(), ".pi", "agent", "extensions", "collaborating-agents", "index.ts");
 const CMUX_PANE_IDLE_GRACE_MS = 1200;
+// An assistant error can be a transient provider failure the pane recovers from,
+// so an error must not settle the run as fast as a clean answer does. But waiting
+// for the exit marker alone is unbounded: a child that dies before its wrapper
+// writes the marker leaves the parent parked on the full inactivity budget with
+// no signal at all. A recovering pane keeps writing records, which resets the
+// activity clock, so total silence for this long after an error means it is not
+// coming back.
+const CMUX_PANE_ERROR_SETTLE_MS = 15_000;
 const CMUX_PANE_MAX_IDLE_TIMEOUT_MULTIPLIER = 6;
 const CMUX_PANE_MAX_IDLE_TIMEOUT_BUFFER_MS = 60_000;
 
@@ -1073,11 +1081,12 @@ function readSpawnSessionState(sessionFile: string): {
 // provider failures that the pane recovers from. Wait for the latest successful
 // assistant output to remain idle, or for the process to exit/timeout after an
 // error, instead of returning the first non-toolUse message we see.
-async function waitForSettledSessionResult(args: {
+export async function waitForSettledSessionResult(args: {
   sessionFile: string;
   exitMarkerPath: string;
   timeoutMs: number;
   idleGraceMs?: number;
+  errorSettleMs?: number;
   onUpdate?: (state: { sessionId?: string; progress?: SubagentProgress }) => void;
 }): Promise<{
   sessionId?: string;
@@ -1087,6 +1096,7 @@ async function waitForSettledSessionResult(args: {
   timedOut: boolean;
 }> {
   const idleGraceMs = Math.max(100, Math.floor(args.idleGraceMs ?? CMUX_PANE_IDLE_GRACE_MS));
+  const errorSettleMs = Math.max(idleGraceMs, Math.floor(args.errorSettleMs ?? CMUX_PANE_ERROR_SETTLE_MS));
   // Treat timeoutMs as an inactivity budget instead of an absolute wall-clock
   // cap. Long-running research subagents can legitimately stay busy for well
   // over 10 minutes; as long as the session file keeps changing, keep waiting.
@@ -1153,6 +1163,10 @@ async function waitForSettledSessionResult(args: {
       return { sessionId, terminalAssistantText, terminalError, exitCode, timedOut: false };
     }
 
+    if (terminalError !== undefined && Date.now() - lastActivityAt >= errorSettleMs) {
+      return { sessionId, terminalAssistantText, terminalError, exitCode, timedOut: false };
+    }
+
     await sleep(100);
   }
 
@@ -1162,6 +1176,10 @@ async function waitForSettledSessionResult(args: {
   }
 
   if (terminalAssistantText !== undefined && terminalError === undefined && Date.now() - lastActivityAt >= idleGraceMs) {
+    return { sessionId, terminalAssistantText, terminalError, exitCode, timedOut: false };
+  }
+
+  if (terminalError !== undefined) {
     return { sessionId, terminalAssistantText, terminalError, exitCode, timedOut: false };
   }
 
@@ -1774,6 +1792,7 @@ export async function runSpawnTask(
     launchDelayMs?: number;
     launchMode?: SubagentLaunchMode;
     closeCompletedCmuxPane?: boolean;
+    closeFailedCmuxPane?: boolean;
     preserveOrchestratorPane?: boolean;
     cmuxResultTimeoutMs?: number;
     onLaunch?: (launch: SpawnResult) => void | Promise<void>;
@@ -1926,6 +1945,37 @@ export async function runSpawnTask(
     result.cmuxPaneRef = paneLaunch.paneRef;
     result.cmuxSurfaceRef = paneLaunch.surfaceRef;
 
+    // Every terminal outcome now runs through one release point instead of the
+    // failure paths returning early and leaking the pane. A failed pane is still
+    // kept on screen by default so the failure can be read where it happened;
+    // `closeFailedCmuxPanes` opts into closing it, which is what an orchestrator
+    // that retries after a provider error wants, so retries stop stacking fresh
+    // panes on top of dead ones. Failure detail survives in the durable run
+    // record and the session file either way.
+    const releasePane = async (outcome: "completed" | "failed" = "completed"): Promise<SpawnResult> => {
+      if (outcome === "failed" && options.closeFailedCmuxPane !== true) return result;
+      if (outcome === "completed" && options.closeCompletedCmuxPane === false) return result;
+      if (!result.cmuxSurfaceRef) return result;
+      const closeResult = await closeSubagentPane(result.launchMode, {
+        paneRef: result.cmuxPaneRef,
+        surfaceRef: result.cmuxSurfaceRef,
+      });
+      if (closeResult.ok) {
+        result.cmuxPaneClosed = true;
+        if (result.cmuxWorkspaceRef) {
+          await withPaneLayoutLock(async () => {
+            removePaneFromLayout(result.cmuxWorkspaceRef!, {
+              paneRef: result.cmuxPaneRef,
+              surfaceRef: result.cmuxSurfaceRef,
+            });
+          });
+        }
+      } else {
+        result.cmuxCloseError = closeResult.error;
+      }
+      return result;
+    };
+
     if (options.onLaunch) {
       const launchSnapshot: SpawnResult = {
         ...result,
@@ -1951,7 +2001,7 @@ export async function runSpawnTask(
         : "Timed out waiting for subagent session file in pane";
       result.error = paneScreen || defaultError;
       result.output = result.error;
-      return result;
+      return await releasePane("failed");
     }
 
     const sessionState = await waitForSettledSessionResult({
@@ -1973,7 +2023,7 @@ export async function runSpawnTask(
       result.output = sessionState.terminalAssistantText?.trim() || sessionState.terminalError;
       result.exitCode = sessionState.exitCode !== null && sessionState.exitCode !== 0 ? sessionState.exitCode : 1;
       result.error = sessionState.terminalError;
-      return result;
+      return await releasePane("failed");
     }
 
     if (sessionState.exitCode !== null && sessionState.exitCode !== 0) {
@@ -1990,7 +2040,7 @@ export async function runSpawnTask(
       }
 
       result.error = result.error ?? `${result.launchMode} subagent exited with code ${sessionState.exitCode}`;
-      return result;
+      return await releasePane("failed");
     }
 
     if (sessionState.terminalAssistantText === undefined || sessionState.timedOut) {
@@ -1998,7 +2048,7 @@ export async function runSpawnTask(
       result.exitCode = 1;
       result.error = paneScreen || "Timed out waiting for settled subagent response in pane";
       result.output = result.error;
-      return result;
+      return await releasePane("failed");
     }
 
     result.sessionId = sessionState.sessionId ?? result.sessionId;
@@ -2007,32 +2057,10 @@ export async function runSpawnTask(
 
     if (result.exitCode !== 0) {
       result.error = result.error ?? `${result.launchMode} subagent exited with code ${result.exitCode}`;
-      return result;
+      return await releasePane("failed");
     }
 
-    if (options.closeCompletedCmuxPane === false) {
-      return result;
-    }
-
-    if (result.cmuxSurfaceRef) {
-      const closeResult = await closeSubagentPane(result.launchMode, {
-        paneRef: result.cmuxPaneRef,
-        surfaceRef: result.cmuxSurfaceRef,
-      });
-      if (closeResult.ok) {
-        result.cmuxPaneClosed = true;
-        if (result.cmuxWorkspaceRef) {
-          await withPaneLayoutLock(async () => {
-            removePaneFromLayout(result.cmuxWorkspaceRef!, {
-              paneRef: result.cmuxPaneRef,
-              surfaceRef: result.cmuxSurfaceRef,
-            });
-          });
-        }
-      }
-      else result.cmuxCloseError = closeResult.error;
-    }
-    return result;
+    return await releasePane();
   }
 
   result.exitCode = await new Promise<number>((resolve) => {

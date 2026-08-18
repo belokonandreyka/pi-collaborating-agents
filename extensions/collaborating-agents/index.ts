@@ -1593,6 +1593,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         parentAgentName: state.agentName,
         launchMode: config.subagentLaunchMode,
         closeCompletedCmuxPane: config.closeCompletedCmuxPanes,
+        closeFailedCmuxPane: config.closeFailedCmuxPanes,
         preserveOrchestratorPane: config.preserveOrchestratorPane,
         onLaunch: (launch) => {
           markSubagentRunLaunched(childRunIds[0]!, typeConfig.name, launch, runRecordWarnings);
@@ -1686,6 +1687,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         launchDelayMs: launchStaggerMs * index,
         launchMode: config.subagentLaunchMode,
         closeCompletedCmuxPane: config.closeCompletedCmuxPanes,
+        closeFailedCmuxPane: config.closeFailedCmuxPanes,
         preserveOrchestratorPane: config.preserveOrchestratorPane,
         onLaunch: (launch) => {
           markSubagentRunLaunched(recordId, typeConfig.name, launch, runRecordWarnings);

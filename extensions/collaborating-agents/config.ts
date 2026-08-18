@@ -12,6 +12,9 @@ const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
   messageHistoryLimit: 400,
   subagentLaunchMode: "process",
   closeCompletedCmuxPanes: true,
+  // Off by default: a failed pane is kept on screen so the failure can be read
+  // where it happened. Turn on when retries matter more than post-mortems.
+  closeFailedCmuxPanes: false,
   preserveOrchestratorPane: false,
   subagentProgressIntervalMs: 30_000,
   subagentCompletionDisplay: "full",
@@ -76,6 +79,10 @@ export function loadConfig(cwd: string): CollaboratingAgentsConfig {
       typeof merged.closeCompletedCmuxPanes === "boolean"
         ? merged.closeCompletedCmuxPanes
         : DEFAULT_CONFIG.closeCompletedCmuxPanes,
+    closeFailedCmuxPanes:
+      typeof merged.closeFailedCmuxPanes === "boolean"
+        ? merged.closeFailedCmuxPanes
+        : DEFAULT_CONFIG.closeFailedCmuxPanes,
     preserveOrchestratorPane:
       typeof merged.preserveOrchestratorPane === "boolean"
         ? merged.preserveOrchestratorPane

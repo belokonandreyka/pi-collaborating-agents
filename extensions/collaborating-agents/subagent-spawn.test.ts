@@ -10,6 +10,7 @@ import {
   resetPaneLayoutStateForTests,
   resolveSpawnAgentDefinition,
   runSpawnTask,
+  waitForSettledSessionResult,
 } from "./subagent-spawn.ts";
 
 const tempDirs: string[] = [];
@@ -740,6 +741,71 @@ afterEach(() => {
   } else {
     delete process.env.USERPROFILE;
   }
+});
+
+describe("settled session result", () => {
+  function writeErrorSession(dir: string): string {
+    const sessionFile = path.join(dir, "session.jsonl");
+    fs.writeFileSync(
+      sessionFile,
+      [
+        JSON.stringify({ type: "session", id: "s-1", timestamp: "2026-08-18T15:52:26.000Z" }),
+        JSON.stringify({
+          type: "message",
+          id: "m-1",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "Codex error: The usage limit has been reached",
+          },
+        }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+    return sessionFile;
+  }
+
+  test("settles on a terminal error even when the child never writes an exit marker", async () => {
+    const tempDir = makeTempDir("collab-settle-error");
+    const sessionFile = writeErrorSession(tempDir);
+
+    const startedAt = Date.now();
+    const result = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 30_000,
+      idleGraceMs: 100,
+      errorSettleMs: 200,
+    });
+    const elapsed = Date.now() - startedAt;
+
+    expect(result.terminalError).toBe("Error: Codex error: The usage limit has been reached");
+    expect(result.exitCode).toBeNull();
+    expect(result.timedOut).toBe(false);
+    // Without the bounded error-settle window this parked on the full 30s
+    // inactivity budget instead of reporting the failure.
+    expect(elapsed).toBeLessThan(5_000);
+  });
+
+  test("an exit marker still short-circuits the error settle window", async () => {
+    const tempDir = makeTempDir("collab-settle-error-marker");
+    const sessionFile = writeErrorSession(tempDir);
+    const exitMarkerPath = path.join(tempDir, "run.exit");
+    fs.writeFileSync(exitMarkerPath, "1\n", "utf-8");
+
+    const result = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath,
+      timeoutMs: 30_000,
+      idleGraceMs: 100,
+      errorSettleMs: 60_000,
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.terminalError).toBe("Error: Codex error: The usage limit has been reached");
+    expect(result.timedOut).toBe(false);
+  });
 });
 
 describe("subagent spawn", () => {

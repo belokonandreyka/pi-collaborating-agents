@@ -155,6 +155,7 @@ export interface CollaboratingAgentsConfig {
   messageHistoryLimit: number;
   subagentLaunchMode: SubagentLaunchMode;
   closeCompletedCmuxPanes: boolean;
+  closeFailedCmuxPanes: boolean;
   preserveOrchestratorPane: boolean;
   /** Minimum gap between progress updates posted to the orchestrator, per child. 0 disables them. */
   subagentProgressIntervalMs: number;

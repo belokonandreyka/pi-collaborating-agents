@@ -12,6 +12,7 @@ const DEFAULT_CONFIG = {
   messageHistoryLimit: 400,
   subagentLaunchMode: "process",
   closeCompletedCmuxPanes: true,
+  closeFailedCmuxPanes: false,
   preserveOrchestratorPane: false,
   subagentProgressIntervalMs: 30_000,
   subagentCompletionDisplay: "full",
@@ -53,6 +54,21 @@ describe("config loading", () => {
     expect(loadConfig(cwd)).toEqual(DEFAULT_CONFIG);
   });
 
+  test("closeFailedCmuxPanes can be turned on from config", () => {
+    const home = makeTempDir("collab-config-home-failed-panes");
+    setHome(home);
+
+    const globalConfigPath = path.join(home, ".pi", "agent", "collaborating-agents.json");
+    fs.mkdirSync(path.dirname(globalConfigPath), { recursive: true });
+    fs.writeFileSync(globalConfigPath, JSON.stringify({ closeFailedCmuxPanes: true }), "utf-8");
+
+    const config = loadConfig(makeTempDir("collab-config-cwd-failed-panes"));
+
+    expect(config.closeFailedCmuxPanes).toBe(true);
+    // Turning it on must not disturb the completed-pane behaviour.
+    expect(config.closeCompletedCmuxPanes).toBe(true);
+  });
+
   test("merges global and project configs with project taking precedence", () => {
     const home = makeTempDir("collab-config-home-merge");
     setHome(home);
@@ -87,6 +103,7 @@ describe("config loading", () => {
       messageHistoryLimit: 75,
       subagentLaunchMode: "cmux-pane",
       closeCompletedCmuxPanes: false,
+      closeFailedCmuxPanes: false,
       preserveOrchestratorPane: true,
       subagentProgressIntervalMs: 5_000,
       subagentCompletionDisplay: "hidden",
