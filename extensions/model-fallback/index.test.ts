@@ -219,11 +219,25 @@ describe("model-fallback extension entry", () => {
     };
 
     await emit(fake, "session_start", { reason: "startup" }, ctx);
+    // The turn produced real work before the provider died, so the plain resume
+    // text is the correct one.
+    await emit(
+      fake,
+      "message_end",
+      {
+        message: {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [{ type: "toolCall", name: "bash" }],
+        },
+      },
+      ctx,
+    );
     await emit(fake, "after_provider_response", { status: 429, headers: {} }, ctx);
     await emit(
       fake,
       "message_end",
-      { message: { role: "assistant", stopReason: "error", errorMessage: "rate limit" } },
+      { message: { role: "assistant", stopReason: "error", errorMessage: "rate limit", content: [] } },
       ctx,
     );
     await emit(fake, "agent_settled", {}, ctx);
@@ -240,6 +254,49 @@ describe("model-fallback extension entry", () => {
     expect(sent.message.details.previousModel).toEqual({ provider: "anthropic", id: "opus" });
     expect(sent.message.details.nextModel).toEqual({ provider: "github-copilot", id: "claude" });
     expect(sent.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+  });
+
+  test("should send the cold-start resume text when the provider refused the first request", async () => {
+    writeGlobalConfig({
+      enabled: true,
+      chain: ["anthropic/opus", "github-copilot/claude"],
+      resumeText: "please continue",
+      coldStartResumeText: "nothing to resume",
+      orchestratorOnly: true,
+    });
+    const fake = makeFakeAPI();
+    factory(toPiApi(fake));
+
+    const ctx = {
+      cwd: process.cwd(),
+      model: { provider: "anthropic", id: "opus" },
+      modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
+      ui: { notify: () => {} },
+    };
+
+    await emit(fake, "session_start", { reason: "startup" }, ctx);
+    await emit(fake, "before_agent_start", {}, ctx);
+    // The whole turn: one empty assistant message carrying the provider refusal.
+    // This is a fresh session answering "hello", not interrupted work.
+    await emit(fake, "after_provider_response", { status: 429, headers: {} }, ctx);
+    await emit(
+      fake,
+      "message_end",
+      {
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "The usage limit has been reached",
+          content: [],
+        },
+      },
+      ctx,
+    );
+    await emit(fake, "agent_settled", {}, ctx);
+    await flushDeferred();
+
+    expect(fake.sentMessages).toHaveLength(1);
+    expect(fake.sentMessages[0]!.message.content).toBe("nothing to resume");
   });
 
   test("should read the context size from getContextUsage so warnings can fire", async () => {

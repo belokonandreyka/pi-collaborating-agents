@@ -139,17 +139,32 @@ export default function (pi: ExtensionAPI): void {
     controllerRef.current?.onProviderResponse(event.status);
   });
 
+  // A rejected first request arrives as an assistant message with no content at
+  // all (`content: []`); anything the model actually emitted — prose or a tool
+  // call — makes the turn resumable. Unknown shapes read as "no output".
+  const messageHadOutput = (content: unknown): boolean => {
+    if (typeof content === "string") return content.trim().length > 0;
+    if (!Array.isArray(content)) return false;
+    return content.some((block) => {
+      if (!block || typeof block !== "object") return false;
+      const record = block as { type?: unknown; text?: unknown };
+      if (record.type === "text") return typeof record.text === "string" && record.text.trim().length > 0;
+      return record.type !== undefined;
+    });
+  };
+
   const handleAssistantMessage = (message: unknown) => {
     if (!message || typeof message !== "object") return;
     const asRecord = message as {
       role?: unknown;
       stopReason?: unknown;
       errorMessage?: unknown;
+      content?: unknown;
     };
     if (asRecord.role !== "assistant") return;
     const stopReason = typeof asRecord.stopReason === "string" ? asRecord.stopReason : undefined;
     const errorMessage = typeof asRecord.errorMessage === "string" ? asRecord.errorMessage : undefined;
-    controllerRef.current?.onAssistantMessage(stopReason, errorMessage);
+    controllerRef.current?.onAssistantMessage(stopReason, errorMessage, messageHadOutput(asRecord.content));
   };
 
   // `message_end` already carries finalized stopReason / errorMessage; a
@@ -194,6 +209,7 @@ export default function (pi: ExtensionAPI): void {
   // the user-prompt path, so it drops exactly the orphan.
   pi.on("before_agent_start", () => {
     try {
+      controllerRef.current?.onTurnStart();
       controllerRef.current?.onCompactionEnd();
     } catch {
       // ignore

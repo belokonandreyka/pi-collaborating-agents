@@ -38,6 +38,7 @@ function makeHarness(overrides: HarnessOverrides = {}): Harness {
     enabled: true,
     notifyUser: true,
     resumeText: "resume-please",
+    coldStartResumeText: "cold-resume",
     chain: [
       { provider: "anthropic", id: "claude-opus-4-8" },
       { provider: "github-copilot", id: "claude-opus-4.7" },
@@ -134,6 +135,9 @@ describe("FallbackController", () => {
 
   test("should advance to the next chain entry, send continuation once, and clear pending error", async () => {
     const harness = makeHarness();
+    // The turn had already produced work before the provider died, so the plain
+    // resume text applies.
+    harness.controller.onAssistantMessage("toolUse", undefined, true);
     harness.controller.onProviderResponse(429);
     harness.controller.onAssistantMessage("error", "rate limit hit");
 
@@ -566,11 +570,36 @@ describe("FallbackController compaction failures", () => {
 
   test("should carry the plain resumeText on an error-driven switch", async () => {
     const harness = makeCompactionHarness();
+    harness.controller.onAssistantMessage("toolUse", undefined, true);
     harness.controller.onProviderResponse(429);
 
     expect((await harness.controller.handleSettled()).kind).toBe("switched");
 
     expect(harness.continuations[0]!.resumeText).toBe("resume-please");
+  });
+
+  test("should use the cold-start resume text when the turn produced no output", async () => {
+    const harness = makeCompactionHarness();
+    // No assistant output at all: the provider refused the first request, which
+    // is what a fresh session hitting an exhausted quota looks like.
+    harness.controller.onProviderResponse(429);
+    harness.controller.onAssistantMessage("error", "usage limit reached");
+
+    expect((await harness.controller.handleSettled()).kind).toBe("switched");
+
+    expect(harness.continuations[0]!.resumeText).toBe("cold-resume");
+    expect(harness.continuations[0]!.resumeText).not.toBe("resume-please");
+  });
+
+  test("onTurnStart clears output seen in an earlier turn", async () => {
+    const harness = makeCompactionHarness();
+    harness.controller.onAssistantMessage("toolUse", undefined, true);
+    harness.controller.onTurnStart();
+    harness.controller.onProviderResponse(429);
+
+    expect((await harness.controller.handleSettled()).kind).toBe("switched");
+
+    expect(harness.continuations[0]!.resumeText).toBe("cold-resume");
   });
 
   test("should ignore threshold and manual compaction reasons", async () => {

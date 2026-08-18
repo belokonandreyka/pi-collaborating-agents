@@ -70,6 +70,7 @@ export class FallbackController {
   private lastStatus: number | undefined;
   private lastErrorMessage: string | undefined;
   private lastStopReason: string | undefined;
+  private producedOutputThisTurn = false;
   private switchingInFlight = false;
   private exhaustedNotified = false;
   private pendingCompaction: CompactionAttempt | undefined;
@@ -103,7 +104,23 @@ export class FallbackController {
     this.pendingCompaction = undefined;
   }
 
-  onAssistantMessage(stopReason: string | undefined, errorMessage: string | undefined): void {
+  /**
+   * `hadOutput` distinguishes a provider that died mid-work from one that
+   * refused the first request outright; only the former leaves anything to
+   * resume. Optional so a caller that cannot tell reads as "no output", which
+   * is the safe side: a neutral resume prompt costs a fresh model nothing,
+   * while a false "continue where you stopped" sends it looking for work.
+   */
+  onTurnStart(): void {
+    this.producedOutputThisTurn = false;
+  }
+
+  onAssistantMessage(
+    stopReason: string | undefined,
+    errorMessage: string | undefined,
+    hadOutput?: boolean,
+  ): void {
+    if (hadOutput === true) this.producedOutputThisTurn = true;
     this.lastStopReason = stopReason;
     if (stopReason === "error" || stopReason === "aborted") {
       this.lastErrorMessage = errorMessage ?? this.lastErrorMessage;
@@ -250,10 +267,15 @@ export class FallbackController {
                 message: this.lastErrorMessage,
                 classification: classificationReason,
               };
+        // A compaction failure always follows real work, so it keeps its own
+        // text unconditionally. A provider error does not: on a cold turn there
+        // is nothing to continue.
         const resumeText =
           trigger === "compaction_failure"
             ? this.deps.config.compactionFailureResumeText
-            : this.deps.config.resumeText;
+            : this.producedOutputThisTurn
+              ? this.deps.config.resumeText
+              : this.deps.config.coldStartResumeText;
 
         // Outside the notifyUser guard for the same reason as the notices
         // below: without it the model change has no visible cause at all.
