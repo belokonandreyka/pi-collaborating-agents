@@ -20,6 +20,30 @@ export interface PendingSubagentCompletionUpdate {
   triggerTurn?: boolean;
 }
 
+// A failed subagent's `error` can carry arbitrary child stderr or a pane screen
+// grab. The hidden wake withholds that on purpose, so the reason surfaced to the
+// parent is a CLASSIFICATION, never the text itself: enough to decide whether a
+// retry is meaningful (a provider quota clears on its own; a real failure does
+// not), with the detail left in the durable run record.
+const FAILURE_CLASSIFIERS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /usage limit|rate.?limit|quota|too many requests|\b429\b/i, label: "provider usage limit reached" },
+  { pattern: /unauthori[sz]ed|forbidden|authentication|invalid api key|\b401\b|\b403\b/i, label: "provider authentication failed" },
+  { pattern: /timed? ?out|timeout|deadline exceeded/i, label: "timed out" },
+  { pattern: /not found|unknown model|unsupported model|\b404\b/i, label: "model or endpoint not found" },
+];
+
+function classifySpawnFailure(result: SpawnResult): string | undefined {
+  const haystack = result.error ?? "";
+  if (!haystack.trim()) return undefined;
+  return FAILURE_CLASSIFIERS.find(({ pattern }) => pattern.test(haystack))?.label;
+}
+
+function describeSpawnFailure(result: SpawnResult): string {
+  const classification = classifySpawnFailure(result);
+  const exitLabel = `exit code ${result.exitCode}`;
+  return classification ? `${classification} (${exitLabel})` : exitLabel;
+}
+
 function formatAgentDisplayName(agentName: string): string {
   const callsignMatch = agentName.match(/-([A-Z][a-z]+[A-Z][A-Za-z]+)$/);
   if (callsignMatch?.[1]) return callsignMatch[1];
@@ -73,16 +97,40 @@ export function buildSubagentCompletionMessagePayload(
       inspectionLines.push('- agent_message({ action: "sessions" })');
     }
 
+    // A hidden wake withholds subagent output on purpose. A failure reason is
+    // not output: without it the parent only learns that something "requires
+    // attention" and must spend a tool call to find out whether the run failed
+    // on its own merits or on a provider quota, which decides whether retrying
+    // is even meaningful.
+    const failureReasons = spawnResults
+      .map((spawnResult, index) => ({ spawnResult, runId: childRunIds[index] }))
+      .filter(({ spawnResult }) => spawnResult.exitCode !== 0 || Boolean(spawnResult.error))
+      .map(({ spawnResult, runId }) => ({
+        runId,
+        name: formatAgentDisplayName(spawnResult.name),
+        exitCode: spawnResult.exitCode,
+        reason: describeSpawnFailure(spawnResult),
+      }));
+    const failureLines = failureReasons.map(
+      ({ name, runId, reason }) => `- ${name}${runId ? ` (${runId})` : ""}: ${reason}`,
+    );
+
     return {
       customType: "collab_focus_status",
       content: [
         result.isError ? "Subagent completion requires attention." : "Subagent completion ready.",
         childRunIds.length > 0 ? `${runLabel}: ${childRunIds.join(", ")}` : undefined,
+        ...(failureLines.length > 0 ? ["Failure reason:", ...failureLines] : []),
         "Inspect the durable run record and transcript:",
         ...inspectionLines,
       ].filter((line): line is string => Boolean(line)).join("\n"),
       display: false,
-      details: { mode: "subagent_completion_wake", childRunIds, failed: result.isError === true },
+      details: {
+        mode: "subagent_completion_wake",
+        childRunIds,
+        failed: result.isError === true,
+        ...(failureReasons.length > 0 ? { failureReasons } : {}),
+      },
     };
   }
 

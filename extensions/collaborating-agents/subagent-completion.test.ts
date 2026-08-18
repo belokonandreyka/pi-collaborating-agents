@@ -107,6 +107,61 @@ describe("subagent completion payload helpers", () => {
     });
   });
 
+  test("buildSubagentCompletionMessagePayload carries the failure reason in a hidden wake token", () => {
+    const failed = makeSpawnResult({
+      name: "GoldFalcon-e23f-DawnSparrow",
+      exitCode: 1,
+      error: "Error: Codex error: The usage limit has been reached",
+      output: "secret partial output",
+    });
+
+    const payload = buildSubagentCompletionMessagePayload(
+      {
+        content: [{ type: "text", text: "fallback" }],
+        details: { mode: "subagent", result: failed, childRunIds: ["e23f5021-0"] },
+        isError: true,
+      },
+      { hiddenWake: true },
+    );
+
+    expect(payload.content).toContain("Subagent completion requires attention.");
+    expect(payload.content).toContain("Failure reason:");
+    expect(payload.content).toContain("DawnSparrow (e23f5021-0): provider usage limit reached (exit code 1)");
+    // The classification must not become a loophole for withheld child text.
+    expect(payload.content).not.toContain("secret partial output");
+    expect(payload.content).not.toContain("Codex error");
+    expect(JSON.stringify(payload.details)).not.toContain("Codex error");
+    expect(payload.details).toEqual({
+      mode: "subagent_completion_wake",
+      childRunIds: ["e23f5021-0"],
+      failed: true,
+      failureReasons: [
+        {
+          runId: "e23f5021-0",
+          name: "DawnSparrow",
+          exitCode: 1,
+          reason: "provider usage limit reached (exit code 1)",
+        },
+      ],
+    });
+  });
+
+  test("buildSubagentCompletionMessagePayload falls back to the exit code when a failure carries no error text", () => {
+    const failed = makeSpawnResult({ exitCode: 137, error: undefined, output: "withheld output" });
+
+    const payload = buildSubagentCompletionMessagePayload(
+      {
+        content: [{ type: "text", text: "fallback" }],
+        details: { mode: "subagent", result: failed, childRunIds: ["run-oom"] },
+        isError: true,
+      },
+      { hiddenWake: true },
+    );
+
+    expect(payload.content).toContain("exit code 137");
+    expect(payload.content).not.toContain("withheld output");
+  });
+
   test("buildSubagentCompletionMessagePayload uses idle-grace wording for auto-closed panes", () => {
     const single = makeSpawnResult({
       name: "SwiftTiger-1a2b-ClearWave",
