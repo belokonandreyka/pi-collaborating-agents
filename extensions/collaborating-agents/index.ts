@@ -980,7 +980,9 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
 
     const explicit = Boolean(process.env.PI_AGENT_NAME);
 
+    const baseName = state.agentName;
     const tryRegister = (name: string): boolean => {
+      const previous = state.agentName;
       state.agentName = name;
       const ok = registerSelf(dirs, buildRegistration(ctx));
       if (ok) {
@@ -988,21 +990,24 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         rememberCoordinatorSession(ctx);
         return true;
       }
+      // Roll back so a failed attempt doesn't extend the base name on retry
+      // (previously turned e.g. "AmberHarbor" into "AmberHarbor23456..." -> ENAMETOOLONG).
+      state.agentName = previous;
       return false;
     };
 
     if (explicit) {
-      if (!tryRegister(state.agentName)) {
-        ctx.ui.notify(`collaborating-agents: name '${state.agentName}' already in use`, "error");
+      if (!tryRegister(baseName)) {
+        ctx.ui.notify(`collaborating-agents: name '${baseName}' already in use`, "error");
         return false;
       }
       return true;
     }
 
-    if (tryRegister(state.agentName)) return true;
+    if (tryRegister(baseName)) return true;
 
     for (let i = 2; i <= 50; i++) {
-      if (tryRegister(`${state.agentName}${i}`)) return true;
+      if (tryRegister(`${baseName}${i}`)) return true;
     }
 
     ctx.ui.notify("collaborating-agents: failed to find an available agent name", "error");
