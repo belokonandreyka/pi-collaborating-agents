@@ -5,7 +5,15 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getDefaultSubagentType } from "./subagent-types.js";
 import { resolveDirs } from "./paths.js";
-import type { SubagentTypeConfig } from "./types.js";
+import type { SubagentLaunchMode, SubagentTypeConfig } from "./types.js";
+import {
+  herdrCallerPaneFromEnv,
+  herdrClosePane,
+  herdrListPanes,
+  herdrReadPane,
+  herdrSendLine,
+  herdrSplitPane,
+} from "./herdr.js";
 
 export interface SpawnAgentDefinition {
   name: string;
@@ -34,7 +42,7 @@ export interface SpawnResult {
   sessionId?: string;
   sessionFile?: string;
   sessionFileUnavailableReason?: string;
-  launchMode: "process" | "cmux-pane";
+  launchMode: SubagentLaunchMode;
   workingDirectory: string;
   launchArgs: string[];
   launchCommand: string;
@@ -83,41 +91,41 @@ const CMUX_PANE_IDLE_GRACE_MS = 1200;
 const CMUX_PANE_MAX_IDLE_TIMEOUT_MULTIPLIER = 6;
 const CMUX_PANE_MAX_IDLE_TIMEOUT_BUFFER_MS = 60_000;
 
-type CmuxLayoutRole = "orchestrator" | "subagent";
-type CmuxSplitDirection = "right" | "down";
+type PaneLayoutRole = "orchestrator" | "subagent";
+type PaneSplitDirection = "right" | "down";
 
 interface FileChangeToken {
   mtimeMs: number;
   size: number;
 }
 
-interface CmuxLayoutLeafNode {
+interface PaneLayoutLeafNode {
   kind: "leaf";
   id: string;
   paneRef: string;
   surfaceRef: string;
-  role: CmuxLayoutRole;
+  role: PaneLayoutRole;
   order: number;
 }
 
-interface CmuxLayoutBranchNode {
+interface PaneLayoutBranchNode {
   kind: "branch";
   id: string;
-  left: CmuxLayoutNode;
-  right: CmuxLayoutNode;
+  left: PaneLayoutNode;
+  right: PaneLayoutNode;
 }
 
-type CmuxLayoutNode = CmuxLayoutLeafNode | CmuxLayoutBranchNode;
+type PaneLayoutNode = PaneLayoutLeafNode | PaneLayoutBranchNode;
 
-interface CmuxLayoutLeafCandidate extends CmuxLayoutLeafNode {
+interface PaneLayoutLeafCandidate extends PaneLayoutLeafNode {
   depth: number;
 }
 
-interface CmuxWorkspaceLayoutState {
+interface PaneWorkspaceLayoutState {
   workspaceRef: string;
   orchestratorPaneRef: string;
   orchestratorSurfaceRef: string;
-  root: CmuxLayoutNode;
+  root: PaneLayoutNode;
   nextNodeId: number;
   nextOrder: number;
 }
@@ -125,14 +133,14 @@ interface CmuxWorkspaceLayoutState {
 // Tracks the orchestrator + live subagent panes per workspace so we can keep
 // splitting the largest managed pane instead of repeatedly shrinking the
 // orchestrator pane.
-const cmuxWorkspaceLayouts = new Map<string, CmuxWorkspaceLayoutState>();
-let cmuxLayoutLock: Promise<void> = Promise.resolve();
+const paneWorkspaceLayouts = new Map<string, PaneWorkspaceLayoutState>();
+let paneLayoutLock: Promise<void> = Promise.resolve();
 
-function createCmuxWorkspaceLayoutState(args: {
+function createPaneWorkspaceLayoutState(args: {
   workspaceRef: string;
   paneRef: string;
   surfaceRef: string;
-}): CmuxWorkspaceLayoutState {
+}): PaneWorkspaceLayoutState {
   return {
     workspaceRef: args.workspaceRef,
     orchestratorPaneRef: args.paneRef,
@@ -150,50 +158,50 @@ function createCmuxWorkspaceLayoutState(args: {
   };
 }
 
-function nextCmuxLayoutNodeId(state: CmuxWorkspaceLayoutState): string {
+function nextPaneLayoutNodeId(state: PaneWorkspaceLayoutState): string {
   const id = `n${state.nextNodeId}`;
   state.nextNodeId += 1;
   return id;
 }
 
-function collectCmuxLayoutLeaves(node: CmuxLayoutNode, depth = 0, leaves: CmuxLayoutLeafCandidate[] = []): CmuxLayoutLeafCandidate[] {
+function collectPaneLayoutLeaves(node: PaneLayoutNode, depth = 0, leaves: PaneLayoutLeafCandidate[] = []): PaneLayoutLeafCandidate[] {
   if (node.kind === "leaf") {
     leaves.push({ ...node, depth });
     return leaves;
   }
 
-  collectCmuxLayoutLeaves(node.left, depth + 1, leaves);
-  collectCmuxLayoutLeaves(node.right, depth + 1, leaves);
+  collectPaneLayoutLeaves(node.left, depth + 1, leaves);
+  collectPaneLayoutLeaves(node.right, depth + 1, leaves);
   return leaves;
 }
 
-function findCmuxLayoutLeaf(node: CmuxLayoutNode, predicate: (leaf: CmuxLayoutLeafNode) => boolean): CmuxLayoutLeafNode | null {
+function findPaneLayoutLeaf(node: PaneLayoutNode, predicate: (leaf: PaneLayoutLeafNode) => boolean): PaneLayoutLeafNode | null {
   if (node.kind === "leaf") {
     return predicate(node) ? node : null;
   }
 
-  return findCmuxLayoutLeaf(node.left, predicate) ?? findCmuxLayoutLeaf(node.right, predicate);
+  return findPaneLayoutLeaf(node.left, predicate) ?? findPaneLayoutLeaf(node.right, predicate);
 }
 
-function replaceCmuxLayoutLeaf(node: CmuxLayoutNode, targetLeafId: string, replacement: CmuxLayoutNode): CmuxLayoutNode {
+function replacePaneLayoutLeaf(node: PaneLayoutNode, targetLeafId: string, replacement: PaneLayoutNode): PaneLayoutNode {
   if (node.kind === "leaf") {
     return node.id === targetLeafId ? replacement : node;
   }
 
   return {
     ...node,
-    left: replaceCmuxLayoutLeaf(node.left, targetLeafId, replacement),
-    right: replaceCmuxLayoutLeaf(node.right, targetLeafId, replacement),
+    left: replacePaneLayoutLeaf(node.left, targetLeafId, replacement),
+    right: replacePaneLayoutLeaf(node.right, targetLeafId, replacement),
   };
 }
 
-function removeCmuxLayoutLeaf(node: CmuxLayoutNode, predicate: (leaf: CmuxLayoutLeafNode) => boolean): CmuxLayoutNode | null {
+function removePaneLayoutLeaf(node: PaneLayoutNode, predicate: (leaf: PaneLayoutLeafNode) => boolean): PaneLayoutNode | null {
   if (node.kind === "leaf") {
     return predicate(node) ? null : node;
   }
 
-  const left = removeCmuxLayoutLeaf(node.left, predicate);
-  const right = removeCmuxLayoutLeaf(node.right, predicate);
+  const left = removePaneLayoutLeaf(node.left, predicate);
+  const right = removePaneLayoutLeaf(node.right, predicate);
 
   if (!left && !right) return null;
   if (!left) return right;
@@ -206,22 +214,22 @@ function removeCmuxLayoutLeaf(node: CmuxLayoutNode, predicate: (leaf: CmuxLayout
   };
 }
 
-function getOrCreateCmuxWorkspaceLayout(args: {
+function getOrCreatePaneWorkspaceLayout(args: {
   workspaceRef: string;
   paneRef: string;
   surfaceRef: string;
-}): CmuxWorkspaceLayoutState {
-  const existing = cmuxWorkspaceLayouts.get(args.workspaceRef);
+}): PaneWorkspaceLayoutState {
+  const existing = paneWorkspaceLayouts.get(args.workspaceRef);
   if (!existing) {
-    const created = createCmuxWorkspaceLayoutState(args);
-    cmuxWorkspaceLayouts.set(args.workspaceRef, created);
+    const created = createPaneWorkspaceLayoutState(args);
+    paneWorkspaceLayouts.set(args.workspaceRef, created);
     return created;
   }
 
-  const orchestratorLeaf = findCmuxLayoutLeaf(existing.root, (leaf) => leaf.role === "orchestrator");
+  const orchestratorLeaf = findPaneLayoutLeaf(existing.root, (leaf) => leaf.role === "orchestrator");
   if (!orchestratorLeaf || orchestratorLeaf.surfaceRef !== args.surfaceRef) {
-    const reset = createCmuxWorkspaceLayoutState(args);
-    cmuxWorkspaceLayouts.set(args.workspaceRef, reset);
+    const reset = createPaneWorkspaceLayoutState(args);
+    paneWorkspaceLayouts.set(args.workspaceRef, reset);
     return reset;
   }
 
@@ -230,14 +238,14 @@ function getOrCreateCmuxWorkspaceLayout(args: {
   return existing;
 }
 
-function chooseCmuxSplitLeaf(
-  state: CmuxWorkspaceLayoutState,
+function choosePaneSplitLeaf(
+  state: PaneWorkspaceLayoutState,
   preserveOrchestratorPane: boolean,
-): CmuxLayoutLeafCandidate {
+): PaneLayoutLeafCandidate {
   // The shallowest leaf approximates the largest visible pane in the current
   // split tree. Preserved layouts balance only within the subagent subtree once
   // it exists; legacy layouts merely prefer subagents on depth ties.
-  const leaves = collectCmuxLayoutLeaves(state.root);
+  const leaves = collectPaneLayoutLeaves(state.root);
   const subagentLeaves = preserveOrchestratorPane ? leaves.filter((leaf) => leaf.role === "subagent") : [];
   const candidates = subagentLeaves.length > 0 ? subagentLeaves : leaves;
   const [selected] = candidates.sort((a, b) => {
@@ -250,21 +258,21 @@ function chooseCmuxSplitLeaf(
   return selected;
 }
 
-function chooseCmuxSplitDirection(splitLeaf: CmuxLayoutLeafCandidate): CmuxSplitDirection {
+function choosePaneSplitDirection(splitLeaf: PaneLayoutLeafCandidate): PaneSplitDirection {
   // Alternate horizontal and vertical splits by tree depth so the managed pane
   // layout grows toward a grid instead of endlessly slicing columns.
   return splitLeaf.depth % 2 === 0 ? "right" : "down";
 }
 
-function applyCmuxSplitToLayout(
-  state: CmuxWorkspaceLayoutState,
-  splitLeaf: CmuxLayoutLeafCandidate,
+function applyPaneSplitToLayout(
+  state: PaneWorkspaceLayoutState,
+  splitLeaf: PaneLayoutLeafCandidate,
   createdPaneRef: string,
   createdSurfaceRef: string,
 ): void {
-  const newPaneLeaf: CmuxLayoutLeafNode = {
+  const newPaneLeaf: PaneLayoutLeafNode = {
     kind: "leaf",
-    id: nextCmuxLayoutNodeId(state),
+    id: nextPaneLayoutNodeId(state),
     paneRef: createdPaneRef,
     surfaceRef: createdSurfaceRef,
     role: "subagent",
@@ -272,9 +280,9 @@ function applyCmuxSplitToLayout(
   };
   state.nextOrder += 1;
 
-  state.root = replaceCmuxLayoutLeaf(state.root, splitLeaf.id, {
+  state.root = replacePaneLayoutLeaf(state.root, splitLeaf.id, {
     kind: "branch",
-    id: nextCmuxLayoutNodeId(state),
+    id: nextPaneLayoutNodeId(state),
     left: {
       kind: "leaf",
       id: splitLeaf.id,
@@ -287,11 +295,11 @@ function applyCmuxSplitToLayout(
   });
 }
 
-function removeCmuxPaneFromLayout(workspaceRef: string, args: { paneRef?: string; surfaceRef?: string }): void {
-  const state = cmuxWorkspaceLayouts.get(workspaceRef);
+function removePaneFromLayout(workspaceRef: string, args: { paneRef?: string; surfaceRef?: string }): void {
+  const state = paneWorkspaceLayouts.get(workspaceRef);
   if (!state) return;
 
-  const nextRoot = removeCmuxLayoutLeaf(state.root, (leaf) => {
+  const nextRoot = removePaneLayoutLeaf(state.root, (leaf) => {
     if (leaf.role === "orchestrator") return false;
     if (args.surfaceRef && leaf.surfaceRef === args.surfaceRef) return true;
     if (args.paneRef && leaf.paneRef === args.paneRef) return true;
@@ -299,17 +307,17 @@ function removeCmuxPaneFromLayout(workspaceRef: string, args: { paneRef?: string
   });
 
   if (!nextRoot) {
-    cmuxWorkspaceLayouts.delete(workspaceRef);
+    paneWorkspaceLayouts.delete(workspaceRef);
     return;
   }
 
   state.root = nextRoot;
 }
 
-async function withCmuxLayoutLock<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = cmuxLayoutLock;
+async function withPaneLayoutLock<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = paneLayoutLock;
   let release!: () => void;
-  cmuxLayoutLock = new Promise<void>((resolve) => {
+  paneLayoutLock = new Promise<void>((resolve) => {
     release = resolve;
   });
 
@@ -321,9 +329,9 @@ async function withCmuxLayoutLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export function resetCmuxLayoutStateForTests(): void {
-  cmuxWorkspaceLayouts.clear();
-  cmuxLayoutLock = Promise.resolve();
+export function resetPaneLayoutStateForTests(): void {
+  paneWorkspaceLayouts.clear();
+  paneLayoutLock = Promise.resolve();
 }
 
 export function createDefaultSpawnAgentDefinition(name = "subagent"): SpawnAgentDefinition {
@@ -1298,10 +1306,10 @@ function findSurfacePaneRef(snapshot: Map<string, string[]>, surfaceRef: string)
   return undefined;
 }
 
-function syncCmuxLayoutStateWithSnapshot(state: CmuxWorkspaceLayoutState, snapshot: Map<string, string[]>): void {
+function syncPaneLayoutStateWithSnapshot(state: PaneWorkspaceLayoutState, snapshot: Map<string, string[]>): void {
   const paneRefs = new Set(snapshot.keys());
 
-  const leaves = collectCmuxLayoutLeaves(state.root);
+  const leaves = collectPaneLayoutLeaves(state.root);
   for (const leaf of leaves) {
     const actualPaneRef = findSurfacePaneRef(snapshot, leaf.surfaceRef);
     if (actualPaneRef) {
@@ -1312,14 +1320,14 @@ function syncCmuxLayoutStateWithSnapshot(state: CmuxWorkspaceLayoutState, snapsh
     }
 
     if (leaf.role === "subagent") {
-      removeCmuxPaneFromLayout(state.workspaceRef, {
+      removePaneFromLayout(state.workspaceRef, {
         paneRef: leaf.paneRef,
         surfaceRef: leaf.surfaceRef,
       });
     }
   }
 
-  const orchestratorLeaf = findCmuxLayoutLeaf(state.root, (leaf) => leaf.role === "orchestrator");
+  const orchestratorLeaf = findPaneLayoutLeaf(state.root, (leaf) => leaf.role === "orchestrator");
   const actualOrchestratorPane = orchestratorLeaf ? findSurfacePaneRef(snapshot, orchestratorLeaf.surfaceRef) : undefined;
   if (orchestratorLeaf && actualOrchestratorPane && !paneRefs.has(orchestratorLeaf.paneRef)) {
     orchestratorLeaf.paneRef = actualOrchestratorPane;
@@ -1362,7 +1370,7 @@ async function reorderCmuxSurfaceBefore(args: {
 }
 
 async function rebalanceCmuxWorkspaceSurfaces(
-  state: CmuxWorkspaceLayoutState,
+  state: PaneWorkspaceLayoutState,
   preserveOrchestratorPane: boolean,
 ): Promise<void> {
   // Phase 2: after choosing a balanced split target, reconcile the live cmux
@@ -1370,7 +1378,7 @@ async function rebalanceCmuxWorkspaceSurfaces(
   const snapshot = await snapshotCmuxWorkspace(state.workspaceRef);
   if (snapshot.size === 0) return;
 
-  const desiredLeaves = collectCmuxLayoutLeaves(state.root);
+  const desiredLeaves = collectPaneLayoutLeaves(state.root);
   const surfaceToPane = new Map<string, string>();
   for (const [paneRef, surfaceRefs] of snapshot.entries()) {
     for (const surfaceRef of surfaceRefs) {
@@ -1427,7 +1435,7 @@ async function createCmuxSplit(args: {
   workspaceRef: string;
   targetPaneRef: string;
   targetSurfaceRef: string;
-  direction: CmuxSplitDirection;
+  direction: PaneSplitDirection;
 }): Promise<
   | {
       ok: true;
@@ -1477,7 +1485,7 @@ async function launchCmuxPane(args: {
       error: string;
     }
 > {
-  return await withCmuxLayoutLock(async () => {
+  return await withPaneLayoutLock(async () => {
     const identify = await runCmuxCommand(["identify", "--json"]);
     if (identify.exitCode !== 0) {
       return { ok: false, error: identify.stderr || identify.stdout || "Failed to identify current cmux surface" };
@@ -1488,13 +1496,13 @@ async function launchCmuxPane(args: {
       return { ok: false, error: "cmux pane launch requires running inside a cmux terminal surface" };
     }
 
-    const layoutState = getOrCreateCmuxWorkspaceLayout(callerContext);
+    const layoutState = getOrCreatePaneWorkspaceLayout(callerContext);
     const beforeSnapshot = await snapshotCmuxWorkspace(callerContext.workspaceRef);
     if (beforeSnapshot.size > 0) {
-      syncCmuxLayoutStateWithSnapshot(layoutState, beforeSnapshot);
+      syncPaneLayoutStateWithSnapshot(layoutState, beforeSnapshot);
     }
-    let splitTarget = chooseCmuxSplitLeaf(layoutState, args.preserveOrchestratorPane);
-    let splitDirection = chooseCmuxSplitDirection(splitTarget);
+    let splitTarget = choosePaneSplitLeaf(layoutState, args.preserveOrchestratorPane);
+    let splitDirection = choosePaneSplitDirection(splitTarget);
 
     let split = await createCmuxSplit({
       workspaceRef: callerContext.workspaceRef,
@@ -1504,12 +1512,12 @@ async function launchCmuxPane(args: {
     });
 
     if (!split.ok && splitTarget.role !== "orchestrator") {
-      removeCmuxPaneFromLayout(callerContext.workspaceRef, {
+      removePaneFromLayout(callerContext.workspaceRef, {
         paneRef: splitTarget.paneRef,
         surfaceRef: splitTarget.surfaceRef,
       });
-      splitTarget = chooseCmuxSplitLeaf(layoutState, args.preserveOrchestratorPane);
-      splitDirection = chooseCmuxSplitDirection(splitTarget);
+      splitTarget = choosePaneSplitLeaf(layoutState, args.preserveOrchestratorPane);
+      splitDirection = choosePaneSplitDirection(splitTarget);
       split = await createCmuxSplit({
         workspaceRef: callerContext.workspaceRef,
         targetPaneRef: splitTarget.paneRef,
@@ -1544,7 +1552,7 @@ async function launchCmuxPane(args: {
       return { ok: false, error: "Failed to resolve cmux pane refs after split" };
     }
 
-    applyCmuxSplitToLayout(layoutState, splitTarget, paneContext.paneRef, paneContext.surfaceRef);
+    applyPaneSplitToLayout(layoutState, splitTarget, paneContext.paneRef, paneContext.surfaceRef);
 
     const send = await runCmuxCommand([
       "send",
@@ -1571,7 +1579,7 @@ async function launchCmuxPane(args: {
     const postRebalanceContext =
       postRebalanceIdentify.exitCode === 0 ? parseCmuxIdentify(postRebalanceIdentify.stdout) : null;
     if (postRebalanceContext) {
-      const newPaneLeaf = findCmuxLayoutLeaf(layoutState.root, (leaf) => leaf.surfaceRef === paneContext.surfaceRef);
+      const newPaneLeaf = findPaneLayoutLeaf(layoutState.root, (leaf) => leaf.surfaceRef === paneContext.surfaceRef);
       if (newPaneLeaf) newPaneLeaf.paneRef = postRebalanceContext.paneRef;
       paneContext.paneRef = postRebalanceContext.paneRef;
     }
@@ -1593,6 +1601,166 @@ async function closeCmuxSurface(surfaceRef: string): Promise<{ ok: true } | { ok
   return { ok: true };
 }
 
+/**
+ * Herdr has no surface layer, so a pane id is the whole identity. Reporting it
+ * as both refs lets the shared layout tree, the run store and every downstream
+ * consumer stay mode-agnostic.
+ */
+async function snapshotHerdrWorkspace(workspaceId: string): Promise<Map<string, string[]>> {
+  const panes = await herdrListPanes(workspaceId);
+  if (!panes.ok) return new Map();
+
+  const snapshot = new Map<string, string[]>();
+  for (const pane of panes.value) {
+    snapshot.set(pane.paneId, [pane.paneId]);
+  }
+
+  return snapshot;
+}
+
+async function launchHerdrPane(args: {
+  scriptPath: string;
+  preserveOrchestratorPane: boolean;
+  cwd: string;
+}): Promise<
+  | {
+      ok: true;
+      workspaceRef: string;
+      paneRef: string;
+      surfaceRef: string;
+    }
+  | {
+      ok: false;
+      error: string;
+    }
+> {
+  return await withPaneLayoutLock(async () => {
+    // Herdr exports HERDR_PANE_ID into every pane it launches, which is both
+    // cheaper and more reliable than asking the server who the caller is.
+    const caller = herdrCallerPaneFromEnv();
+    if (!caller) {
+      return {
+        ok: false,
+        error: "herdr pane launch requires running inside a herdr pane (HERDR_ENV/HERDR_PANE_ID are unset)",
+      };
+    }
+
+    const callerContext = {
+      workspaceRef: caller.workspaceId,
+      paneRef: caller.paneId,
+      surfaceRef: caller.paneId,
+    };
+
+    const layoutState = getOrCreatePaneWorkspaceLayout(callerContext);
+    const beforeSnapshot = await snapshotHerdrWorkspace(caller.workspaceId);
+    if (beforeSnapshot.size > 0) {
+      syncPaneLayoutStateWithSnapshot(layoutState, beforeSnapshot);
+    }
+
+    let splitTarget = choosePaneSplitLeaf(layoutState, args.preserveOrchestratorPane);
+    let split = await herdrSplitPane({
+      paneId: splitTarget.paneRef,
+      direction: choosePaneSplitDirection(splitTarget),
+      cwd: args.cwd,
+    });
+
+    // A subagent pane the user closed by hand is still in our tree; drop it and
+    // retry once against whatever is actually left.
+    if (!split.ok && splitTarget.role !== "orchestrator") {
+      removePaneFromLayout(caller.workspaceId, {
+        paneRef: splitTarget.paneRef,
+        surfaceRef: splitTarget.surfaceRef,
+      });
+      splitTarget = choosePaneSplitLeaf(layoutState, args.preserveOrchestratorPane);
+      split = await herdrSplitPane({
+        paneId: splitTarget.paneRef,
+        direction: choosePaneSplitDirection(splitTarget),
+        cwd: args.cwd,
+      });
+    }
+
+    if (!split.ok) {
+      return { ok: false, error: split.error };
+    }
+
+    const created = split.value;
+    applyPaneSplitToLayout(layoutState, splitTarget, created.paneId, created.paneId);
+
+    const send = await herdrSendLine(created.paneId, args.scriptPath);
+    if (!send.ok) {
+      // The pane exists but will never run anything; leaving it behind would
+      // shrink the workspace for every later split.
+      await herdrClosePane(created.paneId);
+      removePaneFromLayout(caller.workspaceId, { paneRef: created.paneId, surfaceRef: created.paneId });
+      return { ok: false, error: send.error };
+    }
+
+    return {
+      ok: true,
+      workspaceRef: created.workspaceId,
+      paneRef: created.paneId,
+      surfaceRef: created.paneId,
+    };
+  });
+}
+
+/** True for the launch modes that put a subagent in its own terminal pane. */
+export function isPaneLaunchMode(mode: SubagentLaunchMode): boolean {
+  return mode === "cmux-pane" || mode === "herdr-pane";
+}
+
+async function launchSubagentPane(
+  mode: SubagentLaunchMode,
+  args: { scriptPath: string; preserveOrchestratorPane: boolean; cwd: string },
+): Promise<
+  { ok: true; workspaceRef: string; paneRef: string; surfaceRef: string } | { ok: false; error: string }
+> {
+  if (mode === "herdr-pane") return await launchHerdrPane(args);
+  return await launchCmuxPane({
+    scriptPath: args.scriptPath,
+    preserveOrchestratorPane: args.preserveOrchestratorPane,
+  });
+}
+
+async function closeSubagentPane(
+  mode: SubagentLaunchMode,
+  refs: { paneRef?: string; surfaceRef: string },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (mode === "herdr-pane") {
+    const closed = await herdrClosePane(refs.paneRef ?? refs.surfaceRef);
+    return closed.ok ? { ok: true } : { ok: false, error: closed.error };
+  }
+  return await closeCmuxSurface(refs.surfaceRef);
+}
+
+/**
+ * Best-effort terminal capture used only to enrich failure messages, so both
+ * backends degrade to an empty string rather than surfacing their own errors.
+ */
+async function readSubagentPaneScreen(
+  mode: SubagentLaunchMode,
+  refs: { workspaceRef?: string; paneRef?: string; surfaceRef?: string },
+  lines: number,
+): Promise<string> {
+  if (mode === "herdr-pane") {
+    const paneRef = refs.paneRef ?? refs.surfaceRef;
+    return paneRef ? await herdrReadPane(paneRef, lines) : "";
+  }
+
+  if (!refs.workspaceRef || !refs.surfaceRef) return "";
+  const screen = await runCmuxCommand([
+    "read-screen",
+    "--workspace",
+    refs.workspaceRef,
+    "--surface",
+    refs.surfaceRef,
+    "--scrollback",
+    "--lines",
+    String(lines),
+  ]);
+  return screen.stdout;
+}
+
 export async function runSpawnTask(
   runtimeCwd: string,
   task: SpawnTask,
@@ -1604,7 +1772,7 @@ export async function runSpawnTask(
     recursionDepth: number;
     parentAgentName?: string;
     launchDelayMs?: number;
-    launchMode?: "process" | "cmux-pane";
+    launchMode?: SubagentLaunchMode;
     closeCompletedCmuxPane?: boolean;
     preserveOrchestratorPane?: boolean;
     cmuxResultTimeoutMs?: number;
@@ -1671,11 +1839,11 @@ export async function runSpawnTask(
   // Process-mode uses Pi JSON events for the first iteration. We do not pass
   // `--session` here until support is proven end-to-end, so transcript tailing
   // is best-effort until child registration or a fallback scan finds a file.
-  const sessionFile = launchMode === "cmux-pane" ? createSubagentSessionFilePath(childName, options.runId.slice(0, 8)) : undefined;
+  const sessionFile = isPaneLaunchMode(launchMode) ? createSubagentSessionFilePath(childName, options.runId.slice(0, 8)) : undefined;
   const exitMarkerPath = sessionFile ? createSubagentExitMarkerPath(sessionFile) : undefined;
 
   const args: string[] =
-    launchMode === "cmux-pane"
+    isPaneLaunchMode(launchMode)
       ? [...commonArgs, "--session", sessionFile!, wrappedTaskPrompt]
       : ["--mode", "json", "-p", ...commonArgs, wrappedTaskPrompt];
 
@@ -1720,42 +1888,43 @@ export async function runSpawnTask(
     await sleep(launchDelayMs);
   }
 
-  if (result.launchMode === "cmux-pane") {
-    const cmuxLaunchEnv: Record<string, string> = {
+  if (isPaneLaunchMode(result.launchMode)) {
+    const paneLaunchEnv: Record<string, string> = {
       ...collectCmuxInheritedEnv(),
       PI_AGENT_NAME: result.launchEnv.PI_AGENT_NAME,
       PI_COLLAB_SUBAGENT_DEPTH: result.launchEnv.PI_COLLAB_SUBAGENT_DEPTH,
     };
 
-    const cmuxLaunchScript = createCmuxPaneLaunchScript({
+    const paneLaunchScript = createCmuxPaneLaunchScript({
       piArgs: args,
-      env: cmuxLaunchEnv,
+      env: paneLaunchEnv,
       cwd,
       exitMarkerPath: exitMarkerPath!,
       childName,
       runId: options.runId,
     });
 
-    const cmuxLaunch = await launchCmuxPane({
-      scriptPath: cmuxLaunchScript.command,
+    const paneLaunch = await launchSubagentPane(result.launchMode, {
+      scriptPath: paneLaunchScript.command,
       preserveOrchestratorPane: options.preserveOrchestratorPane ?? false,
+      cwd,
     });
 
-    if (!cmuxLaunch.ok) {
+    if (!paneLaunch.ok) {
       try {
-        fs.unlinkSync(cmuxLaunchScript.scriptPath);
+        fs.unlinkSync(paneLaunchScript.scriptPath);
       } catch {
         // ignore best-effort cleanup failures
       }
       result.exitCode = 1;
-      result.error = cmuxLaunch.error;
+      result.error = paneLaunch.error;
       result.output = result.error;
       return result;
     }
 
-    result.cmuxWorkspaceRef = cmuxLaunch.workspaceRef;
-    result.cmuxPaneRef = cmuxLaunch.paneRef;
-    result.cmuxSurfaceRef = cmuxLaunch.surfaceRef;
+    result.cmuxWorkspaceRef = paneLaunch.workspaceRef;
+    result.cmuxPaneRef = paneLaunch.paneRef;
+    result.cmuxSurfaceRef = paneLaunch.surfaceRef;
 
     if (options.onLaunch) {
       const launchSnapshot: SpawnResult = {
@@ -1776,20 +1945,11 @@ export async function runSpawnTask(
     });
     if (!sessionFileWait.fileExists) {
       result.exitCode = sessionFileWait.exitCode ?? 1;
-      const paneScreen = await runCmuxCommand([
-        "read-screen",
-        "--workspace",
-        result.cmuxWorkspaceRef!,
-        "--surface",
-        result.cmuxSurfaceRef!,
-        "--scrollback",
-        "--lines",
-        "120",
-      ]);
+      const paneScreen = await readSubagentPaneScreen(result.launchMode, result, 120);
       const defaultError = sessionFileWait.exitCode !== null
-        ? `cmux-pane subagent exited with code ${sessionFileWait.exitCode} before creating its session file`
-        : "Timed out waiting for subagent session file in cmux pane";
-      result.error = paneScreen.stdout || defaultError;
+        ? `${result.launchMode} subagent exited with code ${sessionFileWait.exitCode} before creating its session file`
+        : "Timed out waiting for subagent session file in pane";
+      result.error = paneScreen || defaultError;
       result.output = result.error;
       return result;
     }
@@ -1822,39 +1982,21 @@ export async function runSpawnTask(
       result.exitCode = sessionState.exitCode;
 
       if (sessionState.terminalAssistantText === undefined) {
-        const paneScreen = await runCmuxCommand([
-          "read-screen",
-          "--workspace",
-          result.cmuxWorkspaceRef!,
-          "--surface",
-          result.cmuxSurfaceRef!,
-          "--scrollback",
-          "--lines",
-          "200",
-        ]);
-        if (paneScreen.stdout) {
-          result.output = paneScreen.stdout;
-          result.error = paneScreen.stdout;
+        const paneScreen = await readSubagentPaneScreen(result.launchMode, result, 200);
+        if (paneScreen) {
+          result.output = paneScreen;
+          result.error = paneScreen;
         }
       }
 
-      result.error = result.error ?? `cmux-pane subagent exited with code ${sessionState.exitCode}`;
+      result.error = result.error ?? `${result.launchMode} subagent exited with code ${sessionState.exitCode}`;
       return result;
     }
 
     if (sessionState.terminalAssistantText === undefined || sessionState.timedOut) {
-      const paneScreen = await runCmuxCommand([
-        "read-screen",
-        "--workspace",
-        result.cmuxWorkspaceRef!,
-        "--surface",
-        result.cmuxSurfaceRef!,
-        "--scrollback",
-        "--lines",
-        "200",
-      ]);
+      const paneScreen = await readSubagentPaneScreen(result.launchMode, result, 200);
       result.exitCode = 1;
-      result.error = paneScreen.stdout || "Timed out waiting for settled subagent response in cmux pane";
+      result.error = paneScreen || "Timed out waiting for settled subagent response in pane";
       result.output = result.error;
       return result;
     }
@@ -1864,7 +2006,7 @@ export async function runSpawnTask(
     result.exitCode = sessionState.exitCode ?? 0;
 
     if (result.exitCode !== 0) {
-      result.error = result.error ?? `cmux-pane subagent exited with code ${result.exitCode}`;
+      result.error = result.error ?? `${result.launchMode} subagent exited with code ${result.exitCode}`;
       return result;
     }
 
@@ -1873,12 +2015,15 @@ export async function runSpawnTask(
     }
 
     if (result.cmuxSurfaceRef) {
-      const closeResult = await closeCmuxSurface(result.cmuxSurfaceRef);
+      const closeResult = await closeSubagentPane(result.launchMode, {
+        paneRef: result.cmuxPaneRef,
+        surfaceRef: result.cmuxSurfaceRef,
+      });
       if (closeResult.ok) {
         result.cmuxPaneClosed = true;
         if (result.cmuxWorkspaceRef) {
-          await withCmuxLayoutLock(async () => {
-            removeCmuxPaneFromLayout(result.cmuxWorkspaceRef!, {
+          await withPaneLayoutLock(async () => {
+            removePaneFromLayout(result.cmuxWorkspaceRef!, {
               paneRef: result.cmuxPaneRef,
               surfaceRef: result.cmuxSurfaceRef,
             });

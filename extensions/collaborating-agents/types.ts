@@ -84,7 +84,7 @@ export interface ExtensionState {
   activeSubagentRuns: number;
 }
 
-export type SubagentLaunchMode = "process" | "cmux-pane";
+export type SubagentLaunchMode = "process" | "cmux-pane" | "herdr-pane";
 
 export type SubagentCompletionDisplay = "full" | "hidden";
 

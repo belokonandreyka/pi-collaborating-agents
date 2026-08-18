@@ -20,7 +20,7 @@ const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
 };
 
 function isSubagentLaunchMode(value: unknown): value is SubagentLaunchMode {
-  return value === "process" || value === "cmux-pane";
+  return value === "process" || value === "cmux-pane" || value === "herdr-pane";
 }
 
 function isSubagentCompletionDisplay(value: unknown): value is SubagentCompletionDisplay {

@@ -69,7 +69,7 @@ function isValidRole(role: unknown): role is AgentRole {
 }
 
 function isValidLaunchMode(mode: unknown): mode is SubagentLaunchMode {
-  return mode === "process" || mode === "cmux-pane";
+  return mode === "process" || mode === "cmux-pane" || mode === "herdr-pane";
 }
 
 function isValidSubagentRunStatus(status: unknown): status is SubagentRunStatus {

@@ -364,11 +364,12 @@ Default history depth used by the overlay feed/chat loader.
 
 This is a default baseline; runtime calls may still request larger limits.
 
-#### `subagentLaunchMode` (`"process" | "cmux-pane"`, default: `"process"`)
+#### `subagentLaunchMode` (`"process" | "cmux-pane" | "herdr-pane"`, default: `"process"`)
 
 Controls how spawned subagents are launched.
 
 - `"process"` keeps the current behavior: spawn a background `pi` child process directly.
+- `"herdr-pane"` is the [Herdr](https://herdr.dev) equivalent of `"cmux-pane"`: it splits the caller's pane with `herdr pane split` and types the launch command into the new pane. Herdr's hierarchy is `workspace -> tab -> pane` with no surface layer, so the pane id is reported as both the pane and surface ref, and the surface rebalance pass that `"cmux-pane"` runs has no counterpart. It requires Herdr 0.7.5+ and an orchestrator running inside a Herdr pane — the extension reads `HERDR_ENV`/`HERDR_PANE_ID` to find the caller and fails the launch when they are unset.
 - `"cmux-pane"` launches the subagent in a new visible cmux split pane in the current workspace by calling `cmux new-split` and then sending a real `pi` launch command into that pane.
 - In `"cmux-pane"` mode, the extension tracks the orchestrator pane plus visible subagent panes in the workspace and picks the shallowest managed pane for the next split (preferring subagent panes over the orchestrator on ties). It alternates horizontal and vertical split directions by tree depth so the layout trends toward a balanced grid instead of repeatedly slicing columns off the orchestrator pane.
 - Set `preserveOrchestratorPane` to `true` to reserve the orchestrator's initial half: the first child splits the orchestrator, then later children balance only among live subagent leaves. If every subagent pane has closed, the next child falls back to splitting the orchestrator again.
@@ -399,7 +400,7 @@ Controls whether the orchestrator keeps the half created by the first cmux split
 
 Snapshot reconciliation and split retries follow the same boundary: subagent surfaces are not moved into the orchestrator pane, and a failed subagent target retries another live subagent leaf before falling back.
 
-This setting only affects `"cmux-pane"` launch mode.
+This setting affects the pane launch modes (`"cmux-pane"` and `"herdr-pane"`).
 
 #### `closeCompletedCmuxPanes` (boolean, default: `true`)
 
@@ -408,7 +409,7 @@ Controls whether successfully completed `"cmux-pane"` subagents automatically cl
 - `true` closes successful completed panes by calling `cmux close-surface --surface <ref>` after turn-finished output plus a short idle grace.
 - `false` keeps completed panes open for manual inspection.
 
-This setting only affects `"cmux-pane"` launch mode. Failures or non-zero exits detected during the idle grace leave panes open so logs remain visible.
+This setting affects the pane launch modes (`"cmux-pane"` and `"herdr-pane"`). Failures or non-zero exits detected during the idle grace leave panes open so logs remain visible.
 
 #### `subagentProgressIntervalMs` (number, default: `30000`)
 
@@ -418,7 +419,7 @@ Without this, the orchestrator learns nothing about a child until the child fini
 
 Updates travel through the same delivery queue as completions, so they wait for the parent to be idle and never trigger a turn on their own — the orchestrator reads accumulated progress on its next turn rather than being interrupted. The interval is what keeps a fleet of children from flooding the parent's context; lower it for closer monitoring at the cost of tokens.
 
-This setting only affects `"cmux-pane"` launch mode, which is the only mode that watches a child session file while it runs.
+This setting affects the pane launch modes (`"cmux-pane"` and `"herdr-pane"`), the only modes that watch a child session file while it runs.
 
 Set it to `0` together with `subagentLaunchDisplay: "hidden"` when you want no launch, session-ready, or progress messages rendered.
 
@@ -540,3 +541,9 @@ Manual smoke: cmux mode
 1. When running inside cmux, set `subagentLaunchMode: "cmux-pane"` and spawn a subagent.
 2. Confirm a visible pane opens and the launch/session-ready notices include a session file.
 3. Run `agent_message({ action: "tail", runId: "<run-id>" })` and confirm it tails the cmux session file.
+
+Manual smoke: herdr mode
+
+1. When running inside a Herdr pane, set `subagentLaunchMode: "herdr-pane"` and spawn a subagent.
+2. Confirm a new pane splits off and the launch notice reports a pane target of the form `w1 / w1:p2 / w1:p2`.
+3. Confirm the pane auto-closes after the final output plus idle grace, unless `closeCompletedCmuxPanes` is `false`.

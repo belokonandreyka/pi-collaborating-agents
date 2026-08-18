@@ -1,3 +1,4 @@
+import { isPaneLaunchMode } from "./subagent-spawn.js";
 import type { SpawnResult } from "./subagent-spawn.js";
 
 export interface SubagentCompletionToolResult {
@@ -99,11 +100,11 @@ export function buildSubagentCompletionMessagePayload(
       const status = r.exitCode === 0 ? "ok" : "failed";
       const output = (r.output || "(no output)").trim() || "(no output)";
       const runId = childRunIds[index];
-      const cmuxNote = r.launchMode === "cmux-pane"
+      const cmuxNote = isPaneLaunchMode(r.launchMode)
         ? r.cmuxPaneClosed
-          ? "cmux pane auto-closed after turn-finished output plus idle grace"
+          ? "subagent pane auto-closed after turn-finished output plus idle grace"
           : r.cmuxCloseError
-            ? `cmux pane close note: ${r.cmuxCloseError}`
+            ? `subagent pane close note: ${r.cmuxCloseError}`
             : undefined
         : undefined;
       return [
@@ -128,11 +129,11 @@ export function buildSubagentCompletionMessagePayload(
       ? `Received an error from ${runtimeLabel}.`
       : `Received final results from ${runtimeLabel}.`;
 
-    const cmuxNote = singleResult?.launchMode === "cmux-pane"
+    const cmuxNote = singleResult && isPaneLaunchMode(singleResult.launchMode)
       ? singleResult.cmuxPaneClosed
-        ? "cmux pane auto-closed after turn-finished output plus idle grace"
+        ? "subagent pane auto-closed after turn-finished output plus idle grace"
         : singleResult.cmuxCloseError
-          ? `cmux pane close note: ${singleResult.cmuxCloseError}`
+          ? `subagent pane close note: ${singleResult.cmuxCloseError}`
           : undefined
       : undefined;
 

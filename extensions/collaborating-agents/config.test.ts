@@ -95,6 +95,18 @@ describe("config loading", () => {
     });
   });
 
+  test("accepts herdr-pane as a launch mode", () => {
+    const home = makeTempDir("collab-config-home-herdr");
+    setHome(home);
+
+    const cwd = makeTempDir("collab-config-cwd-herdr");
+    const projectConfigPath = path.join(cwd, ".pi", "collaborating-agents.json");
+    fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true });
+    fs.writeFileSync(projectConfigPath, JSON.stringify({ subagentLaunchMode: "herdr-pane" }), "utf-8");
+
+    expect(loadConfig(cwd).subagentLaunchMode).toBe("herdr-pane");
+  });
+
   test("falls back to defaults when config content is malformed or invalid", () => {
     const home = makeTempDir("collab-config-home-invalid");
     setHome(home);

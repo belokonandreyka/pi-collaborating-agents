@@ -7,12 +7,24 @@ import {
   collectCmuxInheritedEnv,
   discoverSpawnAgents,
   mapWithConcurrencyLimit,
-  resetCmuxLayoutStateForTests,
+  resetPaneLayoutStateForTests,
   resolveSpawnAgentDefinition,
   runSpawnTask,
 } from "./subagent-spawn.ts";
 
 const tempDirs: string[] = [];
+const ORIGINAL_TEST_HERDR_ARGS_FILE = process.env.TEST_HERDR_ARGS_FILE;
+const ORIGINAL_HERDR_ENV = process.env.HERDR_ENV;
+const ORIGINAL_HERDR_PANE_ID = process.env.HERDR_PANE_ID;
+
+function restoreEnv(name: string, original: string | undefined): void {
+  if (typeof original === "string") {
+    process.env[name] = original;
+  } else {
+    delete process.env[name];
+  }
+}
+
 const ORIGINAL_PATH = process.env.PATH;
 const ORIGINAL_TEST_ARGS_FILE = process.env.TEST_ARGS_FILE;
 const ORIGINAL_TEST_CMUX_ARGS_FILE = process.env.TEST_CMUX_ARGS_FILE;
@@ -579,7 +591,11 @@ function getCmuxCommandNames(entries: string[][]): string[] {
 }
 
 afterEach(() => {
-  resetCmuxLayoutStateForTests();
+  resetPaneLayoutStateForTests();
+
+  restoreEnv("TEST_HERDR_ARGS_FILE", ORIGINAL_TEST_HERDR_ARGS_FILE);
+  restoreEnv("HERDR_ENV", ORIGINAL_HERDR_ENV);
+  restoreEnv("HERDR_PANE_ID", ORIGINAL_HERDR_PANE_ID);
 
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
@@ -2427,5 +2443,265 @@ describe("concurrency-limited mapping", () => {
     });
 
     expect(outputs).toEqual(["done-10", "done-40", "done-5", "done-25"]);
+  });
+});
+
+/** herdr and cmux fakes both append one JSON array per invocation. */
+function getCapturedHerdrArgs(argsFile: string): string[][] {
+  return getCapturedCmuxArgs(argsFile);
+}
+
+/**
+ * Minimal `herdr` stand-in. Herdr's flat workspace->pane model needs far less
+ * state than the cmux fake: a pane list, a pending send-text buffer per pane,
+ * and the JSON envelope every command answers with.
+ */
+function writeFakeHerdrBinary(dir: string): { binPath: string; argsFile: string } {
+  const binPath = path.join(dir, "herdr");
+  const argsFile = path.join(dir, "captured-herdr-args.jsonl");
+
+  const script = `#!/usr/bin/env node
+const fs = require("node:fs");
+const cp = require("node:child_process");
+
+const args = process.argv.slice(2);
+const argsFile = process.env.TEST_HERDR_ARGS_FILE;
+const stateFile = argsFile ? argsFile + ".state.json" : null;
+if (argsFile) {
+  fs.appendFileSync(argsFile, JSON.stringify(args) + "\\n", "utf-8");
+}
+
+function initialState() {
+  return { nextPane: 2, panes: ["w1:p1"], pending: {} };
+}
+
+function readState() {
+  if (!stateFile || !fs.existsSync(stateFile)) return initialState();
+  try {
+    return JSON.parse(fs.readFileSync(stateFile, "utf-8"));
+  } catch {
+    return initialState();
+  }
+}
+
+function writeState(state) {
+  if (stateFile) fs.writeFileSync(stateFile, JSON.stringify(state), "utf-8");
+}
+
+function paneInfo(id) {
+  return { agent_status: "unknown", focused: false, pane_id: id, tab_id: "w1:t1", workspace_id: "w1" };
+}
+
+function ok(result) {
+  process.stdout.write(JSON.stringify({ id: "cli:test", result: result }) + "\\n");
+  process.exit(0);
+}
+
+// Real herdr reports failures on stderr and exits non-zero, while send-text and
+// send-keys succeed with no output at all.
+function fail(code, message) {
+  process.stderr.write(JSON.stringify({ error: { code: code, message: message }, id: "cli:test" }) + "\\n");
+  process.exit(1);
+}
+
+function silentOk() {
+  process.exit(0);
+}
+
+function flag(name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : null;
+}
+
+if (args[0] !== "pane") fail("unsupported", "only pane commands are faked");
+
+const command = args[1];
+const state = readState();
+
+if (command === "list") {
+  ok({ panes: state.panes.map(paneInfo), type: "pane_list" });
+}
+
+if (command === "split") {
+  const target = flag("--pane");
+  if (!target || state.panes.indexOf(target) < 0) fail("pane_not_found", "pane " + target + " not found");
+  const id = "w1:p" + state.nextPane;
+  state.nextPane += 1;
+  state.panes.push(id);
+  writeState(state);
+  ok({ pane: paneInfo(id), type: "pane_info" });
+}
+
+if (command === "send-text") {
+  state.pending[args[2]] = args[3] || "";
+  writeState(state);
+  silentOk();
+}
+
+if (command === "send-keys") {
+  if (args[3] !== "Enter") silentOk();
+  const pending = state.pending[args[2]] || "";
+  delete state.pending[args[2]];
+  writeState(state);
+  const result = cp.spawnSync("/bin/bash", ["-lc", pending], {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: "inherit",
+  });
+  if (result.error) fail("run_failed", String(result.error));
+  silentOk();
+}
+
+if (command === "close") {
+  if (process.env.TEST_HERDR_CLOSE_FAIL === "1") fail("close_failed", "close failed");
+  state.panes = state.panes.filter((pane) => pane !== args[2]);
+  writeState(state);
+  ok({ type: "ok" });
+}
+
+if (command === "read") {
+  process.stdout.write("fake herdr pane screen\\n");
+  process.exit(0);
+}
+
+fail("unsupported", "unknown pane command " + command);
+`;
+
+  fs.writeFileSync(binPath, script, { encoding: "utf-8", mode: 0o755 });
+  return { binPath, argsFile };
+}
+
+describe("herdr pane launch mode", () => {
+  const agentDef: SpawnAgentDefinition = {
+    name: "worker",
+    description: "Worker",
+    systemPrompt: "Return concise findings.",
+    source: "bundled",
+    filePath: "/tmp/worker.toml",
+    tools: ["read", "bash"],
+  };
+
+  test("launches a subagent in a herdr pane and collects final session output", async () => {
+    const tempDir = makeTempDir("collab-subagent-herdr-pane");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w1:p1";
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "worker", task: "Inspect the repository" },
+      agentDef,
+      {
+        index: 0,
+        runId: "testrunherdr",
+        recursionDepth: 0,
+        launchMode: "herdr-pane",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toBe("fake-ok");
+    expect(result.sessionId).toBe("fake-session");
+    expect(result.launchMode).toBe("herdr-pane");
+
+    // Herdr has no surface layer, so the pane id stands in for both refs.
+    expect(result.cmuxWorkspaceRef).toBe("w1");
+    expect(result.cmuxPaneRef).toBe("w1:p2");
+    expect(result.cmuxSurfaceRef).toBe("w1:p2");
+    expect(result.cmuxPaneClosed).toBe(true);
+    expect(result.cmuxCloseError).toBeUndefined();
+
+    const captured = getCapturedHerdrArgs(herdrArgsFile);
+    expect(captured.map((entry) => `${entry[0]} ${entry[1]}`)).toEqual([
+      "pane list",
+      "pane split",
+      "pane send-text",
+      "pane send-keys",
+      "pane close",
+    ]);
+
+    const splitArgs = captured[1]!;
+    expect(splitArgs).toContain("--pane");
+    expect(splitArgs).toContain("w1:p1");
+    expect(splitArgs).toContain("--direction");
+    expect(splitArgs).toContain("right");
+    expect(splitArgs).toContain("--cwd");
+
+    const sendTextArgs = captured[2]!;
+    expect(sendTextArgs[2]).toBe("w1:p2");
+    expect(sendTextArgs[3]).toContain("bash ");
+    expect(sendTextArgs[3]).not.toContain("--mode json -p");
+
+    const capturedPiArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
+    expect(capturedPiArgs).toContain("--session");
+    expect(capturedPiArgs[capturedPiArgs.length - 1]).toBe("Inspect the repository");
+
+    expect(captured[4]!).toEqual(["pane", "close", "w1:p2"]);
+  });
+
+  test("refuses to launch when the orchestrator is not inside a herdr pane", async () => {
+    const tempDir = makeTempDir("collab-subagent-herdr-pane-outside");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    delete process.env.HERDR_ENV;
+    delete process.env.HERDR_PANE_ID;
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "worker", task: "Inspect the repository" },
+      agentDef,
+      {
+        index: 0,
+        runId: "testrunherdroutside",
+        recursionDepth: 0,
+        launchMode: "herdr-pane",
+      },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.error).toContain("HERDR_ENV");
+    expect(fs.existsSync(herdrArgsFile)).toBe(false);
+  });
+
+  test("reports the close failure instead of claiming the pane was closed", async () => {
+    const tempDir = makeTempDir("collab-subagent-herdr-pane-close-fail");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w1:p1";
+    process.env.TEST_HERDR_CLOSE_FAIL = "1";
+
+    try {
+      const result = await runSpawnTask(
+        tempDir,
+        { agent: "worker", task: "Inspect the repository" },
+        agentDef,
+        {
+          index: 0,
+          runId: "testrunherdrclose",
+          recursionDepth: 0,
+          launchMode: "herdr-pane",
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.cmuxPaneClosed).toBeUndefined();
+      expect(result.cmuxCloseError).toBe("close_failed: close failed");
+    } finally {
+      delete process.env.TEST_HERDR_CLOSE_FAIL;
+    }
   });
 });
