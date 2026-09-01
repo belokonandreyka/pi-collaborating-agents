@@ -196,6 +196,14 @@ export interface SubagentTypeConfig {
   model?: string;
   /** Optional reasoning level (e.g., "low", "medium", "high", "xhigh") */
   reasoning?: "low" | "medium" | "high" | "xhigh";
+  /**
+   * Optional tool allow-list for this type, replacing the default set. Written
+   * in the TOML as a comma-separated string (`tools = "read, bash, mcp"`),
+   * because the simple parser reads every value as a string. A type that needs
+   * a tool outside the default five — an MCP proxy, for instance — has no other
+   * way to ask for it.
+   */
+  tools?: string[];
   /** The system prompt for this subagent type */
   prompt: string;
   /** Source of the configuration */

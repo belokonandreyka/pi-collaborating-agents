@@ -29,6 +29,7 @@ function writeTypeConfig(
     prompt?: string;
     model?: string;
     reasoning?: "low" | "medium" | "high" | "xhigh";
+    tools?: string;
   },
 ): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -38,6 +39,7 @@ function writeTypeConfig(
     `description = "${options.description}"`,
     options.model ? `model = "${options.model}"` : undefined,
     options.reasoning ? `reasoning = "${options.reasoning}"` : undefined,
+    options.tools ? `tools = "${options.tools}"` : undefined,
     `prompt = """${options.prompt ?? `${options.name} prompt`}"""`,
   ].filter((line): line is string => Boolean(line));
 
@@ -227,5 +229,33 @@ describe("subagent type discovery", () => {
     const resolvedDefault = getDefaultSubagentType(types);
     expect(resolvedDefault.source).toBe("project");
     expect(resolvedDefault.description).toBe("Project worker override");
+  });
+
+  test("reads a comma-separated tool allow-list from the type", () => {
+    const home = makeTempDir("types-home-tools");
+    setHome(home);
+    writeTypeConfig(path.join(home, ".pi", "subagents"), "browser.toml", {
+      name: "browser",
+      description: "Browser verification",
+      tools: "read, bash , agent_message,mcp , read",
+    });
+
+    const type = discoverSubagentTypes(makeTempDir("types-cwd-tools")).find((t) => t.name === "browser");
+
+    // trimmed, de-duplicated, order preserved
+    expect(type?.tools).toEqual(["read", "bash", "agent_message", "mcp"]);
+  });
+
+  test("leaves tools undefined when the type does not ask", () => {
+    const home = makeTempDir("types-home-notools");
+    setHome(home);
+    writeTypeConfig(path.join(home, ".pi", "subagents"), "plain.toml", {
+      name: "plain",
+      description: "No tool list",
+    });
+
+    const type = discoverSubagentTypes(makeTempDir("types-cwd-notools")).find((t) => t.name === "plain");
+
+    expect(type?.tools).toBeUndefined();
   });
 });

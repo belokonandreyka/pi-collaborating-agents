@@ -127,11 +127,18 @@ function loadSubagentTypeFromFile(filePath: string, source: SubagentTypeConfig["
     reasoning = reasoningValue;
   }
 
+  // Comma-separated because parseSimpleToml yields strings, not arrays.
+  const tools = parsed.tools
+    ?.split(",")
+    .map((tool) => tool.trim())
+    .filter(Boolean);
+
   return {
     name,
     description,
     model: parsed.model?.trim() || undefined,
     reasoning,
+    tools: tools && tools.length > 0 ? [...new Set(tools)] : undefined,
     prompt,
     source,
     filePath,

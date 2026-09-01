@@ -2160,7 +2160,9 @@ export function createSpawnAgentDefinitionFromType(
     name: typeConfig.name,
     description: typeConfig.description,
     model: typeConfig.model,
-    tools: [...DEFAULT_SUBAGENT_TOOLS],
+    // A type may widen or narrow the tool set; without one it gets the default
+    // five, which is what every type got before types could ask.
+    tools: typeConfig.tools?.length ? [...typeConfig.tools] : [...DEFAULT_SUBAGENT_TOOLS],
     systemPrompt: typeConfig.prompt,
     source: typeConfig.source,
     filePath: typeConfig.filePath,
