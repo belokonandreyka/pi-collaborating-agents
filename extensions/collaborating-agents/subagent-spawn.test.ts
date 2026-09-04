@@ -9,6 +9,7 @@ import {
   mapWithConcurrencyLimit,
   resetPaneLayoutStateForTests,
   resolveSpawnAgentDefinition,
+  replyToSubagent,
   runSpawnTask,
   waitForSettledSessionResult,
 } from "./subagent-spawn.ts";
@@ -2898,5 +2899,88 @@ describe("herdr pane launch mode", () => {
     } finally {
       delete process.env.TEST_HERDR_CLOSE_FAIL;
     }
+  });
+});
+
+describe("answering a parked subagent", () => {
+  test("types the answer into the live pane and settles on what the child does next", async () => {
+    const tempDir = makeTempDir("collab-reply-delivery");
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+
+    // The transcript already carries the answer and the child's follow-up, so the
+    // wait settles on the resumed turn rather than on the question.
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    fs.writeFileSync(
+      sessionFile,
+      [
+        JSON.stringify({ type: "session", id: "s-reply" }),
+        JSON.stringify({
+          type: "message",
+          id: "m-1",
+          message: {
+            role: "assistant",
+            stopReason: "toolUse",
+            content: [
+              {
+                type: "toolCall",
+                id: "t-1",
+                name: "agent_message",
+                arguments: { action: "send", to: "VividQuartz", message: "Which branch?" },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({ type: "message", id: "m-2", message: { role: "user", content: [{ type: "text", text: "test" }] } }),
+        JSON.stringify({
+          type: "message",
+          id: "m-3",
+          message: { role: "assistant", content: [{ type: "text", text: "Diffed against test: 3 files." }] },
+        }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const outcome = await replyToSubagent({
+      launchMode: "herdr-pane",
+      paneRef: "w1:p2",
+      sessionFile,
+      message: "Diff against test.",
+      parentAgentName: "VividQuartz",
+    });
+
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.output).toBe("Diffed against test: 3 files.");
+      expect(outcome.awaitingReply).toBeUndefined();
+    }
+
+    const captured = fs
+      .readFileSync(herdrArgsFile, "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as string[]);
+
+    // send-text alone leaves the line sitting unsubmitted in the pane.
+    expect(captured).toContainEqual(["pane", "send-text", "w1:p2", "Diff against test."]);
+    expect(captured).toContainEqual(["pane", "send-keys", "w1:p2", "Enter"]);
+  });
+
+  test("refuses to report a delivery when the child has already exited", async () => {
+    const tempDir = makeTempDir("collab-reply-exited");
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    fs.writeFileSync(sessionFile, JSON.stringify({ type: "session", id: "s-gone" }) + "\n", "utf-8");
+    fs.writeFileSync(`${sessionFile}.exit`, "0\n", "utf-8");
+
+    const outcome = await replyToSubagent({
+      launchMode: "herdr-pane",
+      paneRef: "w1:p2",
+      sessionFile,
+      message: "Diff against test.",
+    });
+
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error).toContain("already exited");
   });
 });
