@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+// The extension moved under extensions/, so the repo root is two levels up from
+// this file. Resolving against process.cwd() made both tests fail with ENOENT.
 function readRepoFile(relativePath: string): string {
-  return fs.readFileSync(path.join(process.cwd(), relativePath), "utf-8");
+  return fs.readFileSync(path.join(import.meta.dir, "..", "..", relativePath), "utf-8");
 }
 
 function expectSessionInspectionDocs(content: string): void {
@@ -33,7 +35,7 @@ describe("collaborating-agents public docs", () => {
     expect(readme).toContain("npm pack --dry-run");
     expect(readme).toContain("Manual smoke: process mode");
     expect(readme).toContain("Manual smoke: parallel ambiguity");
-    expect(readme).toContain("Manual smoke: cmux mode");
+    expect(readme).toContain("Manual smoke: pane mode");
     expect(readme).toContain('subagentLaunchDisplay` (`"full" | "compact" | "hidden"');
     expect(readme).toContain('subagentCompletionDisplay` (`"full" | "hidden"');
     expect(readme).toContain("triggerTurnOnSubagentCompletion");

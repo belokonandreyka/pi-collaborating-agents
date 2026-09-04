@@ -139,7 +139,7 @@ describe("config loading", () => {
       projectConfigPath,
       JSON.stringify({
         messageHistoryLimit: 0,
-        subagentLaunchMode: "cmux-window",
+        subagentLaunchMode: "unknown-mode",
         preserveOrchestratorPane: "yes",
         subagentProgressIntervalMs: -1,
         subagentCompletionDisplay: "summary",

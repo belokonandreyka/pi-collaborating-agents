@@ -16,6 +16,9 @@ import {
 
 const tempDirs: string[] = [];
 const ORIGINAL_TEST_HERDR_ARGS_FILE = process.env.TEST_HERDR_ARGS_FILE;
+const ORIGINAL_TEST_HERDR_SEND_ASYNC = process.env.TEST_HERDR_SEND_ASYNC;
+const ORIGINAL_TEST_HERDR_FAIL_SPLIT_PANE = process.env.TEST_HERDR_FAIL_SPLIT_PANE;
+const ORIGINAL_TEST_HERDR_CLOSE_FAIL = process.env.TEST_HERDR_CLOSE_FAIL;
 const ORIGINAL_HERDR_ENV = process.env.HERDR_ENV;
 const ORIGINAL_HERDR_PANE_ID = process.env.HERDR_PANE_ID;
 
@@ -29,17 +32,12 @@ function restoreEnv(name: string, original: string | undefined): void {
 
 const ORIGINAL_PATH = process.env.PATH;
 const ORIGINAL_TEST_ARGS_FILE = process.env.TEST_ARGS_FILE;
-const ORIGINAL_TEST_CMUX_ARGS_FILE = process.env.TEST_CMUX_ARGS_FILE;
-const ORIGINAL_TEST_CMUX_SEND_ASYNC = process.env.TEST_CMUX_SEND_ASYNC;
-const ORIGINAL_TEST_CMUX_SEND_TRUNCATE_AT = process.env.TEST_CMUX_SEND_TRUNCATE_AT;
 const ORIGINAL_TEST_PI_EXIT_DELAY_MS = process.env.TEST_PI_EXIT_DELAY_MS;
 const ORIGINAL_TEST_PI_SESSION_CREATE_DELAY_MS = process.env.TEST_PI_SESSION_CREATE_DELAY_MS;
 const ORIGINAL_TEST_PI_PROCESS_MESSAGE_EVENT = process.env.TEST_PI_PROCESS_MESSAGE_EVENT;
 const ORIGINAL_TEST_PI_SESSION_MESSAGE_END_EVENT = process.env.TEST_PI_SESSION_MESSAGE_END_EVENT;
 const ORIGINAL_TEST_PI_PROCESS_STDERR = process.env.TEST_PI_PROCESS_STDERR;
 const ORIGINAL_TEST_PI_PROCESS_EXIT_CODE = process.env.TEST_PI_PROCESS_EXIT_CODE;
-const ORIGINAL_TEST_CMUX_CLOSE_FAIL = process.env.TEST_CMUX_CLOSE_FAIL;
-const ORIGINAL_TEST_CMUX_FAIL_SPLIT_REF = process.env.TEST_CMUX_FAIL_SPLIT_REF;
 const ORIGINAL_TEST_PI_EXIT_CODE = process.env.TEST_PI_EXIT_CODE;
 const ORIGINAL_TEST_PI_MULTI_TURN = process.env.TEST_PI_MULTI_TURN;
 const ORIGINAL_TEST_PI_SAME_MTIME_FINAL_ONLY = process.env.TEST_PI_SAME_MTIME_FINAL_ONLY;
@@ -325,277 +323,24 @@ process.exit(2);
   return { binPath, argsFile };
 }
 
-function writeFakeCmuxBinary(dir: string): { binPath: string; argsFile: string } {
-  const binPath = path.join(dir, "cmux");
-  const argsFile = path.join(dir, "captured-cmux-args.jsonl");
-
-  const script = `#!/usr/bin/env node
-const fs = require("node:fs");
-const cp = require("node:child_process");
-
-const argsFile = process.env.TEST_CMUX_ARGS_FILE;
-const stateFile = argsFile ? argsFile + ".state.json" : null;
-if (argsFile) {
-  fs.appendFileSync(argsFile, JSON.stringify(process.argv.slice(2)) + "\\n", "utf-8");
-}
-
-function readState() {
-  if (!stateFile || !fs.existsSync(stateFile)) {
-    return {
-      nextRef: 99,
-      panes: {
-        "pane:2": ["surface:2"],
-      },
-      surfaceToPane: { "surface:2": "pane:2" },
-    };
-  }
-
-  try {
-    return JSON.parse(fs.readFileSync(stateFile, "utf-8"));
-  } catch {
-    return {
-      nextRef: 99,
-      panes: {
-        "pane:2": ["surface:2"],
-      },
-      surfaceToPane: { "surface:2": "pane:2" },
-    };
-  }
-}
-
-function writeState(state) {
-  if (!stateFile) return;
-  fs.writeFileSync(stateFile, JSON.stringify(state), "utf-8");
-}
-
-function removeSurfaceFromPane(state, paneRef, surfaceRef) {
-  const pane = state.panes[paneRef];
-  if (!Array.isArray(pane)) return;
-  state.panes[paneRef] = pane.filter((value) => value !== surfaceRef);
-  if (state.panes[paneRef].length === 0) delete state.panes[paneRef];
-}
-
-function addSurfaceToPane(state, paneRef, surfaceRef) {
-  const pane = Array.isArray(state.panes[paneRef]) ? state.panes[paneRef] : [];
-  state.panes[paneRef] = pane.filter((value) => value !== surfaceRef);
-  state.panes[paneRef].push(surfaceRef);
-  state.surfaceToPane[surfaceRef] = paneRef;
-}
-
-const rawArgs = process.argv.slice(2);
-const args = rawArgs[0] === "--json" ? rawArgs.slice(1) : rawArgs;
-if (args[0] === "identify") {
-  const state = readState();
-  const surfaceIndex = args.indexOf("--surface");
-  const targetSurface = surfaceIndex >= 0 ? args[surfaceIndex + 1] : "surface:2";
-  const paneRef = state.surfaceToPane[targetSurface] || "pane:2";
-  process.stdout.write(JSON.stringify({
-    caller: {
-      workspace_ref: "workspace:77",
-      pane_ref: paneRef,
-      surface_ref: targetSurface,
-    },
-  }));
-  process.exit(0);
-}
-
-if (args[0] === "new-split") {
-  const state = readState();
-  const paneIndex = args.indexOf("--panel");
-  const paneRef = paneIndex >= 0 ? args[paneIndex + 1] : null;
-  const surfaceIndex = args.indexOf("--surface");
-  const surfaceRefFromArgs = surfaceIndex >= 0 ? args[surfaceIndex + 1] : null;
-  const failRef = process.env.TEST_CMUX_FAIL_SPLIT_REF;
-  if (failRef && (paneRef === "pane:" + failRef || surfaceRefFromArgs === "surface:" + failRef)) {
-    process.stderr.write("forced split failure\\n");
-    process.exit(1);
-  }
-  if (paneRef && !state.panes[paneRef]) {
-    process.stderr.write("unknown pane\\n");
-    process.exit(1);
-  }
-  if (surfaceRefFromArgs && !state.surfaceToPane[surfaceRefFromArgs]) {
-    process.stderr.write("unknown surface\\n");
-    process.exit(1);
-  }
-  const ref = state.nextRef || 99;
-  const paneRefOut = "pane:" + ref;
-  const surfaceRef = "surface:" + ref;
-  state.nextRef = ref + 1;
-  state.panes[paneRefOut] = [surfaceRef];
-  state.surfaceToPane[surfaceRef] = paneRefOut;
-  writeState(state);
-  process.stdout.write("OK " + surfaceRef + " workspace:77\\n");
-  process.exit(0);
-}
-
-if (args[0] === "list-panes") {
-  const state = readState();
-  const paneRefs = Object.keys(state.panes).sort((a, b) => Number(a.split(":")[1]) - Number(b.split(":")[1]));
-  process.stdout.write(JSON.stringify({ panes: paneRefs.map((paneRef) => ({ pane_ref: paneRef })) }));
-  process.exit(0);
-}
-
-if (args[0] === "list-pane-surfaces") {
-  const state = readState();
-  const paneIndex = args.indexOf("--pane");
-  const paneRef = paneIndex >= 0 ? args[paneIndex + 1] : "pane:2";
-  const surfaceRefs = Array.isArray(state.panes[paneRef]) ? state.panes[paneRef] : [];
-  process.stdout.write(JSON.stringify({ surfaces: surfaceRefs.map((surfaceRef) => ({ surface_ref: surfaceRef })) }));
-  process.exit(0);
-}
-
-if (args[0] === "move-surface") {
-  const state = readState();
-  const surfaceIndex = args.indexOf("--surface");
-  const targetSurface = surfaceIndex >= 0 ? args[surfaceIndex + 1] : null;
-  const paneIndex = args.indexOf("--pane");
-  const targetPane = paneIndex >= 0 ? args[paneIndex + 1] : null;
-
-  if (!targetSurface || !targetPane) {
-    process.stderr.write("missing move target\\n");
-    process.exit(1);
-  }
-
-  const currentPane = state.surfaceToPane[targetSurface];
-  if (currentPane) removeSurfaceFromPane(state, currentPane, targetSurface);
-  addSurfaceToPane(state, targetPane, targetSurface);
-  writeState(state);
-  process.stdout.write("OK\\n");
-  process.exit(0);
-}
-
-if (args[0] === "reorder-surface") {
-  const state = readState();
-  const surfaceIndex = args.indexOf("--surface");
-  const targetSurface = surfaceIndex >= 0 ? args[surfaceIndex + 1] : null;
-  const beforeIndex = args.indexOf("--before");
-  const beforeSurface = beforeIndex >= 0 ? args[beforeIndex + 1] : null;
-
-  if (!targetSurface || !beforeSurface) {
-    process.stderr.write("missing reorder target\\n");
-    process.exit(1);
-  }
-
-  const paneRef = state.surfaceToPane[targetSurface];
-  const beforePaneRef = state.surfaceToPane[beforeSurface];
-  if (!paneRef || !beforePaneRef || paneRef !== beforePaneRef) {
-    process.stderr.write("surfaces not colocated\\n");
-    process.exit(1);
-  }
-
-  const pane = Array.isArray(state.panes[paneRef]) ? state.panes[paneRef].filter((value) => value !== targetSurface) : [];
-  const beforePos = pane.indexOf(beforeSurface);
-  if (beforePos < 0) {
-    pane.push(targetSurface);
-  } else {
-    pane.splice(beforePos, 0, targetSurface);
-  }
-  state.panes[paneRef] = pane;
-  writeState(state);
-  process.stdout.write("OK\\n");
-  process.exit(0);
-}
-
-if (args[0] === "send") {
-  let command = args[args.length - 1] || "";
-  const truncateAt = Number(process.env.TEST_CMUX_SEND_TRUNCATE_AT || "0");
-  if (Number.isFinite(truncateAt) && truncateAt > 0 && command.length > truncateAt) {
-    command = command.slice(0, truncateAt);
-  }
-  if (process.env.TEST_CMUX_SEND_ASYNC === "1") {
-    const child = cp.spawn("/bin/bash", ["-lc", command], {
-      cwd: process.cwd(),
-      env: process.env,
-      stdio: "ignore",
-      detached: true,
-    });
-    child.unref();
-    process.stdout.write("OK\\n");
-    process.exit(0);
-  }
-
-  const result = cp.spawnSync("/bin/bash", ["-lc", command], {
-    cwd: process.cwd(),
-    env: process.env,
-    stdio: "inherit",
-  });
-
-  if (result.error) {
-    process.stderr.write(String(result.error));
-    process.exit(1);
-  }
-
-  process.stdout.write("OK\\n");
-  process.exit(result.status ?? 0);
-}
-
-if (args[0] === "close-surface") {
-  const state = readState();
-  const surfaceIndex = args.indexOf("--surface");
-  const targetSurface = surfaceIndex >= 0 ? args[surfaceIndex + 1] : null;
-  if (process.env.TEST_CMUX_CLOSE_FAIL === "1") {
-    process.stderr.write("close failed\\n");
-    process.exit(1);
-  }
-  if (targetSurface) {
-    const paneRef = state.surfaceToPane[targetSurface];
-    if (paneRef) removeSurfaceFromPane(state, paneRef, targetSurface);
-    delete state.surfaceToPane[targetSurface];
-  }
-  writeState(state);
-  process.stdout.write("OK\\n");
-  process.exit(0);
-}
-
-process.stderr.write("unsupported cmux command");
-process.exit(2);
-`;
-
-  fs.writeFileSync(binPath, script, { encoding: "utf-8", mode: 0o755 });
-  return { binPath, argsFile };
-}
-
-function readFakeCmuxState(argsFile: string): {
-  nextRef: number;
-  panes: Record<string, string[]>;
-  surfaceToPane: Record<string, string>;
-} {
+function readFakeHerdrState(argsFile: string): { nextPane: number; panes: string[]; pending: Record<string, string> } {
   return JSON.parse(fs.readFileSync(`${argsFile}.state.json`, "utf-8"));
 }
 
-function writeFakeCmuxState(
+function writeFakeHerdrState(
   argsFile: string,
-  state: {
-    nextRef: number;
-    panes: Record<string, string[]>;
-    surfaceToPane: Record<string, string>;
-  },
+  state: { nextPane: number; panes: string[]; pending: Record<string, string> },
 ): void {
   fs.writeFileSync(`${argsFile}.state.json`, JSON.stringify(state), "utf-8");
-}
-
-function getCapturedCmuxArgs(argsFile: string): string[][] {
-  return fs
-    .readFileSync(argsFile, "utf-8")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as string[]);
-}
-
-function getCmuxCommandName(entry: string[]): string {
-  return entry[0] === "--json" ? entry[1] ?? "--json" : entry[0] ?? "";
-}
-
-function getCmuxCommandNames(entries: string[][]): string[] {
-  return entries.map(getCmuxCommandName);
 }
 
 afterEach(() => {
   resetPaneLayoutStateForTests();
 
   restoreEnv("TEST_HERDR_ARGS_FILE", ORIGINAL_TEST_HERDR_ARGS_FILE);
+  restoreEnv("TEST_HERDR_SEND_ASYNC", ORIGINAL_TEST_HERDR_SEND_ASYNC);
+  restoreEnv("TEST_HERDR_FAIL_SPLIT_PANE", ORIGINAL_TEST_HERDR_FAIL_SPLIT_PANE);
+  restoreEnv("TEST_HERDR_CLOSE_FAIL", ORIGINAL_TEST_HERDR_CLOSE_FAIL);
   restoreEnv("HERDR_ENV", ORIGINAL_HERDR_ENV);
   restoreEnv("HERDR_PANE_ID", ORIGINAL_HERDR_PANE_ID);
 
@@ -617,23 +362,8 @@ afterEach(() => {
     delete process.env.TEST_ARGS_FILE;
   }
 
-  if (typeof ORIGINAL_TEST_CMUX_ARGS_FILE === "string") {
-    process.env.TEST_CMUX_ARGS_FILE = ORIGINAL_TEST_CMUX_ARGS_FILE;
-  } else {
-    delete process.env.TEST_CMUX_ARGS_FILE;
-  }
 
-  if (typeof ORIGINAL_TEST_CMUX_SEND_ASYNC === "string") {
-    process.env.TEST_CMUX_SEND_ASYNC = ORIGINAL_TEST_CMUX_SEND_ASYNC;
-  } else {
-    delete process.env.TEST_CMUX_SEND_ASYNC;
-  }
 
-  if (typeof ORIGINAL_TEST_CMUX_SEND_TRUNCATE_AT === "string") {
-    process.env.TEST_CMUX_SEND_TRUNCATE_AT = ORIGINAL_TEST_CMUX_SEND_TRUNCATE_AT;
-  } else {
-    delete process.env.TEST_CMUX_SEND_TRUNCATE_AT;
-  }
 
   if (typeof ORIGINAL_TEST_PI_EXIT_DELAY_MS === "string") {
     process.env.TEST_PI_EXIT_DELAY_MS = ORIGINAL_TEST_PI_EXIT_DELAY_MS;
@@ -671,17 +401,7 @@ afterEach(() => {
     delete process.env.TEST_PI_PROCESS_EXIT_CODE;
   }
 
-  if (typeof ORIGINAL_TEST_CMUX_CLOSE_FAIL === "string") {
-    process.env.TEST_CMUX_CLOSE_FAIL = ORIGINAL_TEST_CMUX_CLOSE_FAIL;
-  } else {
-    delete process.env.TEST_CMUX_CLOSE_FAIL;
-  }
 
-  if (typeof ORIGINAL_TEST_CMUX_FAIL_SPLIT_REF === "string") {
-    process.env.TEST_CMUX_FAIL_SPLIT_REF = ORIGINAL_TEST_CMUX_FAIL_SPLIT_REF;
-  } else {
-    delete process.env.TEST_CMUX_FAIL_SPLIT_REF;
-  }
 
   if (typeof ORIGINAL_TEST_PI_EXIT_CODE === "string") {
     process.env.TEST_PI_EXIT_CODE = ORIGINAL_TEST_PI_EXIT_CODE;
@@ -939,7 +659,7 @@ describe("a child parked on a question", () => {
 });
 
 describe("subagent spawn", () => {
-  test("inherits parent profile directories in cmux panes without inventing them", () => {
+  test("inherits parent profile directories in subagent panes without inventing them", () => {
     const inherited = collectInheritedPaneEnv({
       PATH: "/usr/bin",
       PI_CODING_AGENT_DIR: "/tmp/pi-personal",
@@ -1416,81 +1136,16 @@ describe("subagent spawn", () => {
     expect(result.error).toBe("subagent crashed");
   });
 
-  test("can launch a subagent in a visible cmux pane and still collect final session output", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane");
+
+  test("accepts pane assistant output emitted as message_end events", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-assistant-message-end");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
-    process.env.HERDR_ENV = "1";
-    process.env.HERDR_PANE_ID = "w1:p1";
-
-    const agentDef: SpawnAgentDefinition = {
-      name: "worker",
-      description: "Worker",
-      systemPrompt: "Return concise findings.",
-      source: "bundled",
-      filePath: "/tmp/worker.toml",
-      tools: ["read", "bash"],
-    };
-
-    const result = await runSpawnTask(
-      tempDir,
-      {
-        agent: "worker",
-        task: "Inspect the repository",
-      },
-      agentDef,
-      {
-        index: 0,
-        runId: "testrun4",
-        recursionDepth: 0,
-        launchMode: "herdr-pane",
-      },
-    );
-
-    expect(result.exitCode).toBe(0);
-    expect(result.output).toBe("fake-ok");
-    expect(result.sessionId).toBe("fake-session");
-    expect(result.launchMode).toBe("cmux-pane");
-    expect(result.workspaceRef).toBe("workspace:77");
-    expect(result.paneRef).toBe("pane:99");
-    expect(result.surfaceRef).toBe("surface:99");
-    expect(result.paneClosed).toBe(true);
-    expect(result.paneCloseError).toBeUndefined();
-
-    const splitArgs = capturedCmuxArgs[3]!;
-    expect(splitArgs[1]).toBe("right");
-    expect(splitArgs).toContain("--workspace");
-    expect(splitArgs).toContain("--panel");
-    expect(splitArgs).toContain("pane:2");
-
-    const sendArgs = capturedCmuxArgs[5]!;
-    expect(sendArgs).toContain("--workspace");
-    expect(sendArgs).toContain("workspace:77");
-    expect(sendArgs).toContain("--surface");
-    expect(sendArgs).toContain("surface:99");
-    expect(sendArgs[sendArgs.length - 1]).toContain("bash ");
-    expect(sendArgs[sendArgs.length - 1]).not.toContain("--mode json -p");
-
-    const capturedPiArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
-    expect(capturedPiArgs).toContain("--session");
-    expect(capturedPiArgs[capturedPiArgs.length - 1]).toBe("Inspect the repository");
-
-    const closeArgs = capturedCmuxArgs[10]!;
-    expect(closeArgs).toEqual(["close-surface", "--surface", "surface:99"]);
-  });
-
-  test("accepts cmux-pane assistant output emitted as message_end events", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-assistant-message-end");
-    const { argsFile } = writeFakePiBinary(tempDir);
-    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
-
-    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
-    process.env.TEST_ARGS_FILE = argsFile;
-    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_EXIT_DELAY_MS = "1800";
@@ -1527,14 +1182,15 @@ describe("subagent spawn", () => {
     expect(result.paneClosed).toBe(true);
   }, 10000);
 
-  test("treats cmux-pane assistant errors as failed even when pi exits cleanly", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-assistant-error");
+  test("treats pane assistant errors as failed even when pi exits cleanly", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-assistant-error");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_ASSISTANT_ERROR = "1";
@@ -1573,14 +1229,15 @@ describe("subagent spawn", () => {
     expect(capturedHerdrArgs.map((entry) => entry[1])).not.toContain("close");
   });
 
-  test("does not fail a still-running cmux-pane subagent on a transient assistant error", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-transient-assistant-error");
+  test("does not fail a still-running pane subagent on a transient assistant error", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-transient-assistant-error");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_ASSISTANT_ERROR_THEN_FINAL = "1";
@@ -1618,14 +1275,15 @@ describe("subagent spawn", () => {
     expect(result.paneClosed).toBe(true);
   }, 10000);
 
-  test("does not fail a cmux-pane subagent whose session file appears after the startup grace", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-delayed-session");
+  test("does not fail a pane subagent whose session file appears after the startup grace", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-delayed-session");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_SESSION_CREATE_DELAY_MS = "10500";
@@ -1662,14 +1320,15 @@ describe("subagent spawn", () => {
     expect(result.paneClosed).toBe(true);
   }, 20000);
 
-  test("notifies cmux session metadata with the explicit session file", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-session-metadata");
+  test("notifies pane session metadata with the explicit session file", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-session-metadata");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
 
@@ -1692,7 +1351,7 @@ describe("subagent spawn", () => {
       agentDef,
       {
         index: 0,
-        runId: "testrun-cmux-metadata",
+        runId: "testrun-pane-metadata",
         recursionDepth: 0,
         launchMode: "herdr-pane",
         onSessionMetadata: (metadata) => {
@@ -1714,14 +1373,15 @@ describe("subagent spawn", () => {
     ]);
   });
 
-  test("waits for the latest settled assistant message before closing a cmux pane", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-settled-output");
+  test("waits for the latest settled assistant message before closing a pane", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-settled-output");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_EXIT_DELAY_MS = "5000";
@@ -1756,14 +1416,15 @@ describe("subagent spawn", () => {
     expect(result.paneClosed).toBe(true);
   });
 
-  test("extends the cmux result timeout while the session file is still actively changing", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-active-timeout-extension");
+  test("extends the pane result timeout while the session file is still actively changing", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-active-timeout-extension");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_EXIT_DELAY_MS = "2500";
@@ -1799,14 +1460,15 @@ describe("subagent spawn", () => {
     expect(result.paneClosed).toBe(true);
   });
 
-  test("detects successful cmux-pane completion even when the final session write preserves mtime", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-stable-mtime");
+  test("detects successful pane completion even when the final session write preserves mtime", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-stable-mtime");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_EXIT_DELAY_MS = "5000";
@@ -1846,14 +1508,15 @@ describe("subagent spawn", () => {
     expect(result.paneClosed).toBe(true);
   });
 
-  test("can keep completed cmux panes open when auto-close is disabled", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-no-close");
+  test("can keep completed panes open when auto-close is disabled", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-no-close");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_EXIT_DELAY_MS = "5000";
@@ -1890,71 +1553,16 @@ describe("subagent spawn", () => {
     expect(result.paneCloseError).toBeUndefined();
   });
 
-  test("uses a short script-backed cmux send command so long prompts survive send truncation", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-script-send");
+
+  test("uses the legacy balanced pane layout when orchestrator preservation is disabled by default", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-layout");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
-    process.env.HERDR_ENV = "1";
-    process.env.HERDR_PANE_ID = "w1:p1";
-    process.env.TEST_CMUX_SEND_TRUNCATE_AT = "120";
-
-    const longTask = [
-      "Read this filler but ultimately reply with exactly: script-ok",
-      "",
-      "FILLER START",
-      ...new Array(40).fill("Repeat: 1234567890 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ."),
-      "FILLER END",
-    ].join("\n");
-
-    const agentDef: SpawnAgentDefinition = {
-      name: "reviewer",
-      description: "Reviewer",
-      systemPrompt: "Return concise findings and finish with the requested exact text.",
-      source: "bundled",
-      filePath: "/tmp/reviewer.toml",
-      tools: ["read", "bash"],
-    };
-
-    const result = await runSpawnTask(
-      tempDir,
-      {
-        agent: "reviewer",
-        task: longTask,
-      },
-      agentDef,
-      {
-        index: 0,
-        runId: "testrun-script-send",
-        recursionDepth: 0,
-        launchMode: "herdr-pane",
-      },
-    );
-
-    expect(result.exitCode).toBe(0);
-    expect(result.output).toBe("fake-ok");
-
-    const capturedCmuxArgs = getCapturedCmuxArgs(cmuxArgsFile);
-    const sendArgs = capturedCmuxArgs.find((entry) => getCmuxCommandName(entry) === "send");
-    expect(sendArgs).toBeDefined();
-    expect((sendArgs![sendArgs!.length - 1] ?? "").length).toBeLessThan(120);
-
-    const capturedPiArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
-    expect(capturedPiArgs).toContain("--session");
-    expect(capturedPiArgs[capturedPiArgs.length - 1]).toBe(longTask);
-  });
-
-  test("uses the legacy balanced cmux layout when orchestrator preservation is disabled by default", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-layout");
-    const { argsFile } = writeFakePiBinary(tempDir);
-    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
-
-    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
-    process.env.TEST_ARGS_FILE = argsFile;
-    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
 
@@ -1987,24 +1595,25 @@ describe("subagent spawn", () => {
       expect(result.exitCode).toBe(0);
     }
 
-    const capturedCmuxArgs = getCapturedCmuxArgs(cmuxArgsFile);
+    const capturedHerdrArgs = getCapturedHerdrArgs(herdrArgsFile);
 
-    const splitCommands = capturedCmuxArgs.filter((entry) => entry[0] === "new-split");
-    const splitTargets = splitCommands.map((entry) => entry[entry.indexOf("--panel") + 1]);
-    const splitDirections = splitCommands.map((entry) => entry[1]);
+    const splitCommands = capturedHerdrArgs.filter((entry) => entry[1] === "split");
+    const splitTargets = splitCommands.map((entry) => entry[entry.indexOf("--pane") + 1]);
+    const splitDirections = splitCommands.map((entry) => entry[entry.indexOf("--direction") + 1]);
 
-    expect(splitTargets).toEqual(["pane:2", "pane:99", "pane:2"]);
+    expect(splitTargets).toEqual(["w1:p1", "w1:p2", "w1:p1"]);
     expect(splitDirections).toEqual(["right", "down", "down"]);
   });
 
   test("preserves the orchestrator half while balancing sequential launches within the subagent subtree", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-preserved-layout");
+    const tempDir = makeTempDir("collab-subagent-pane-preserved-layout");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
 
@@ -2035,22 +1644,23 @@ describe("subagent spawn", () => {
       expect(result.exitCode).toBe(0);
     }
 
-    const splitTargets = getCapturedCmuxArgs(cmuxArgsFile)
-      .filter((entry) => entry[0] === "new-split")
-      .map((entry) => entry[entry.indexOf("--panel") + 1]);
+    const splitTargets = getCapturedHerdrArgs(herdrArgsFile)
+      .filter((entry) => entry[1] === "split")
+      .map((entry) => entry[entry.indexOf("--pane") + 1]);
 
-    expect(splitTargets).toEqual(["pane:2", "pane:99", "pane:99", "pane:100", "pane:99", "pane:100"]);
-    expect(splitTargets.slice(1)).not.toContain("pane:2");
+    expect(splitTargets).toEqual(["w1:p1", "w1:p2", "w1:p2", "w1:p3", "w1:p2", "w1:p3"]);
+    expect(splitTargets.slice(1)).not.toContain("w1:p1");
   });
 
   test("retries a failed preserved split on another live subagent pane", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-preserved-retry");
+    const tempDir = makeTempDir("collab-subagent-pane-preserved-retry");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
 
@@ -2080,7 +1690,7 @@ describe("subagent spawn", () => {
       expect(result.exitCode).toBe(0);
     }
 
-    process.env.TEST_CMUX_FAIL_SPLIT_REF = "99";
+    process.env.TEST_HERDR_FAIL_SPLIT_PANE = "w1:p2";
     const retryResult = await runSpawnTask(
       tempDir,
       { agent: "worker", task: "Retry away from orchestrator" },
@@ -2094,24 +1704,25 @@ describe("subagent spawn", () => {
         preserveOrchestratorPane: true,
       },
     );
-    delete process.env.TEST_CMUX_FAIL_SPLIT_REF;
+    delete process.env.TEST_HERDR_FAIL_SPLIT_PANE;
 
     expect(retryResult.exitCode).toBe(0);
-    const panelTargets = getCapturedCmuxArgs(cmuxArgsFile)
-      .filter((entry) => entry[0] === "new-split" && entry.includes("--panel"))
-      .map((entry) => entry[entry.indexOf("--panel") + 1]);
-    expect(panelTargets.slice(-2)).toEqual(["pane:99", "pane:100"]);
-    expect(panelTargets.slice(1)).not.toContain("pane:2");
+    const panelTargets = getCapturedHerdrArgs(herdrArgsFile)
+      .filter((entry) => entry[1] === "split")
+      .map((entry) => entry[entry.indexOf("--pane") + 1]);
+    expect(panelTargets.slice(-2)).toEqual(["w1:p2", "w1:p3"]);
+    expect(panelTargets.slice(1)).not.toContain("w1:p1");
   });
 
-  test("removes auto-closed cmux panes from the preserved layout before falling back to the orchestrator", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-layout-close");
+  test("removes auto-closed panes from the preserved layout before falling back to the orchestrator", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-layout-close");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
 
@@ -2145,104 +1756,25 @@ describe("subagent spawn", () => {
       expect(result.paneClosed).toBe(true);
     }
 
-    const capturedCmuxArgs = getCapturedCmuxArgs(cmuxArgsFile);
+    const capturedHerdrArgs = getCapturedHerdrArgs(herdrArgsFile);
 
-    const splitTargets = capturedCmuxArgs
-      .filter((entry) => entry[0] === "new-split")
-      .map((entry) => entry[entry.indexOf("--panel") + 1]);
+    const splitTargets = capturedHerdrArgs
+      .filter((entry) => entry[1] === "split")
+      .map((entry) => entry[entry.indexOf("--pane") + 1]);
 
-    expect(splitTargets).toEqual(["pane:2", "pane:2"]);
+    expect(splitTargets).toEqual(["w1:p1", "w1:p1"]);
   });
 
-  test("true rebalance moves swapped managed surfaces back into their planned panes", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-true-rebalance");
-    const { argsFile } = writeFakePiBinary(tempDir);
-    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
-
-    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
-    process.env.TEST_ARGS_FILE = argsFile;
-    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
-    process.env.HERDR_ENV = "1";
-    process.env.HERDR_PANE_ID = "w1:p1";
-
-    const agentDef: SpawnAgentDefinition = {
-      name: "worker",
-      description: "Worker",
-      systemPrompt: "Return concise findings.",
-      source: "bundled",
-      filePath: "/tmp/worker.toml",
-      tools: ["read", "bash"],
-    };
-
-    const first = await runSpawnTask(
-      tempDir,
-      {
-        agent: "worker",
-        task: "Inspect repository 0",
-      },
-      agentDef,
-      {
-        index: 0,
-        runId: "testrun-true-rebalance-0",
-        recursionDepth: 0,
-        launchMode: "herdr-pane",
-        closeCompletedPane: false,
-      },
-    );
-    expect(first.exitCode).toBe(0);
-
-    const state = readFakeCmuxState(cmuxArgsFile);
-    state.panes = {
-      "pane:2": ["surface:99"],
-      "pane:99": ["surface:2"],
-    };
-    state.surfaceToPane = {
-      "surface:2": "pane:99",
-      "surface:99": "pane:2",
-    };
-    writeFakeCmuxState(cmuxArgsFile, state);
-
-    const second = await runSpawnTask(
-      tempDir,
-      {
-        agent: "worker",
-        task: "Inspect repository 1",
-      },
-      agentDef,
-      {
-        index: 1,
-        runId: "testrun-true-rebalance-1",
-        recursionDepth: 0,
-        launchMode: "herdr-pane",
-        closeCompletedPane: false,
-      },
-    );
-    expect(second.exitCode).toBe(0);
-
-    const finalState = readFakeCmuxState(cmuxArgsFile);
-    expect(finalState.surfaceToPane["surface:2"]).toBe("pane:2");
-    expect(finalState.surfaceToPane["surface:99"]).toBe("pane:99");
-
-    const capturedCmuxArgs = getCapturedCmuxArgs(cmuxArgsFile);
-    const commandNames = getCmuxCommandNames(capturedCmuxArgs);
-    expect(commandNames).toContain("move-surface");
-    expect(commandNames).toContain("reorder-surface");
-
-    const moveCommands = capturedCmuxArgs.filter((entry) => getCmuxCommandName(entry) === "move-surface");
-    expect(moveCommands).toEqual([
-      ["move-surface", "--workspace", "workspace:77", "--surface", "surface:2", "--pane", "pane:2"],
-      ["move-surface", "--workspace", "workspace:77", "--surface", "surface:99", "--pane", "pane:99"],
-    ]);
-  });
 
   test("snapshot sync drops manually closed panes before choosing the next split target", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-snapshot-sync");
+    const tempDir = makeTempDir("collab-subagent-pane-snapshot-sync");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
 
@@ -2272,10 +1804,10 @@ describe("subagent spawn", () => {
     );
     expect(first.exitCode).toBe(0);
 
-    const state = readFakeCmuxState(cmuxArgsFile);
-    delete state.panes["pane:99"];
-    delete state.surfaceToPane["surface:99"];
-    writeFakeCmuxState(cmuxArgsFile, state);
+    // The developer closed the subagent's pane by hand between launches.
+    const state = readFakeHerdrState(herdrArgsFile);
+    state.panes = state.panes.filter((pane) => pane !== "w1:p2");
+    writeFakeHerdrState(herdrArgsFile, state);
 
     const second = await runSpawnTask(
       tempDir,
@@ -2294,22 +1826,23 @@ describe("subagent spawn", () => {
     );
     expect(second.exitCode).toBe(0);
 
-    const capturedCmuxArgs = getCapturedCmuxArgs(cmuxArgsFile);
-    const splitTargets = capturedCmuxArgs
-      .filter((entry) => getCmuxCommandName(entry) === "new-split")
-      .map((entry) => entry[entry.indexOf("--panel") + 1]);
+    const capturedHerdrArgs = getCapturedHerdrArgs(herdrArgsFile);
+    const splitTargets = capturedHerdrArgs
+      .filter((entry) => entry[1] === "split")
+      .map((entry) => entry[entry.indexOf("--pane") + 1]);
 
-    expect(splitTargets).toEqual(["pane:2", "pane:2"]);
+    expect(splitTargets).toEqual(["w1:p1", "w1:p1"]);
   });
 
   test("auto-closes after turn-finished output plus idle grace even if pane process stays open longer", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-idle-grace-close");
+    const tempDir = makeTempDir("collab-subagent-pane-idle-grace-close");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_EXIT_DELAY_MS = "5000";
@@ -2347,13 +1880,14 @@ describe("subagent spawn", () => {
   });
 
   test("keeps pane open when process exits non-zero during idle grace after emitting final output", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-nonzero-after-output");
+    const tempDir = makeTempDir("collab-subagent-pane-nonzero-after-output");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_PI_EXIT_DELAY_MS = "150";
@@ -2388,17 +1922,18 @@ describe("subagent spawn", () => {
     expect(result.error).toContain("exited with code 7");
   });
 
-  test("reports close failure without treating the successful cmux-pane subagent as failed", async () => {
-    const tempDir = makeTempDir("collab-subagent-cmux-pane-close-fails");
+  test("reports close failure without treating the successful pane subagent as failed", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-close-fails");
     const { argsFile } = writeFakePiBinary(tempDir);
     const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
 
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
-    process.env.TEST_CMUX_CLOSE_FAIL = "1";
+    process.env.TEST_HERDR_CLOSE_FAIL = "1";
 
     const agentDef: SpawnAgentDefinition = {
       name: "worker",
@@ -2555,14 +2090,19 @@ describe("concurrency-limited mapping", () => {
   });
 });
 
-/** herdr and cmux fakes both append one JSON array per invocation. */
+/** The herdr fake appends one JSON array per invocation. */
 function getCapturedHerdrArgs(argsFile: string): string[][] {
-  return getCapturedCmuxArgs(argsFile);
+  if (!fs.existsSync(argsFile)) return [];
+  return fs
+    .readFileSync(argsFile, "utf-8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as string[]);
 }
 
 /**
  * Minimal `herdr` stand-in. Herdr's flat workspace->pane model needs far less
- * state than the cmux fake: a pane list, a pending send-text buffer per pane,
+ * state: a pane list, a pending send-text buffer per pane,
  * and the JSON envelope every command answers with.
  */
 function writeFakeHerdrBinary(dir: string): { binPath: string; argsFile: string } {
@@ -2634,6 +2174,9 @@ if (command === "list") {
 if (command === "split") {
   const target = flag("--pane");
   if (!target || state.panes.indexOf(target) < 0) fail("pane_not_found", "pane " + target + " not found");
+  if (process.env.TEST_HERDR_FAIL_SPLIT_PANE && target === process.env.TEST_HERDR_FAIL_SPLIT_PANE) {
+    fail("split_failed", "split on " + target + " failed");
+  }
   const id = "w1:p" + state.nextPane;
   state.nextPane += 1;
   state.panes.push(id);
@@ -2652,6 +2195,19 @@ if (command === "send-keys") {
   const pending = state.pending[args[2]] || "";
   delete state.pending[args[2]];
   writeState(state);
+  // Real herdr returns as soon as the keys are typed; the pane keeps running on
+  // its own. Tests that measure idle grace need that, or the launch call itself
+  // blocks for the child's whole life and every budget is measured wrong.
+  if (process.env.TEST_HERDR_SEND_ASYNC === "1") {
+    const child = cp.spawn("/bin/bash", ["-lc", pending], {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: "ignore",
+      detached: true,
+    });
+    child.unref();
+    silentOk();
+  }
   const result = cp.spawnSync("/bin/bash", ["-lc", pending], {
     cwd: process.cwd(),
     env: process.env,
@@ -2698,6 +2254,7 @@ describe("herdr pane launch mode", () => {
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
 
@@ -2789,6 +2346,7 @@ describe("herdr pane launch mode", () => {
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_ARGS_FILE = argsFile;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
     process.env.HERDR_ENV = "1";
     process.env.HERDR_PANE_ID = "w1:p1";
     process.env.TEST_HERDR_CLOSE_FAIL = "1";

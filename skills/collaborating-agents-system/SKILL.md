@@ -110,7 +110,7 @@ agent_message({ action: "tail", runId: "run-id", mode: "status" })
 
 Returns no transcript — just `status` (`launching` / `running` / `completed` / `failed`) and, once the run is finished, the structured final report already captured in the run registry (`outputPreview`, `exitCode`, `completedAt`, `warnings`). Use this as the cheap heartbeat when the coordinator only cares whether the child is done and what it produced; switch to the default `mode: "full"` (with `sinceOffset`) only when you actually need transcript deltas.
 
-Process mode launches a background `pi` child without a deterministic `--session` file. The extension records the session id from child output and attaches a session file after child self-registration or fallback discovery by session id. Until that happens, tailing may report: `Process-mode session file unavailable until child registration or fallback discovery provides one.` In `cmux-pane` mode, the extension creates an explicit session file under `~/.pi/agent/sessions/collaborating-agents-subagents/`.
+Process mode launches a background `pi` child without a deterministic `--session` file. The extension records the session id from child output and attaches a session file after child self-registration or fallback discovery by session id. Until that happens, tailing may report: `Process-mode session file unavailable until child registration or fallback discovery provides one.` In `herdr-pane` mode, the extension creates an explicit session file under `~/.pi/agent/sessions/collaborating-agents-subagents/`.
 
 ## 2) `subagent` (spawn workers)
 
@@ -237,7 +237,7 @@ Hidden completion sends a minimal Pi custom-message wake token with `display: fa
 
 When automatic triggering is enabled, it replaces task instructions that tell the subagent to send an urgent completion DM solely to wake the coordinator. Do not use both for the same completion; the urgent DM and automatic trigger can race and produce competing turns.
 
-For a fully quiet handoff, also set `subagentLaunchDisplay` to `"hidden"` (which suppresses launch and session-ready `pi.sendMessage` calls entirely) and `subagentProgressIntervalMs` to `0`. Defaults remain full visible launch/completion, normal session-ready behavior, progress every 30 seconds in cmux mode, and no completion-triggered turn.
+For a fully quiet handoff, also set `subagentLaunchDisplay` to `"hidden"` (which suppresses launch and session-ready `pi.sendMessage` calls entirely) and `subagentProgressIntervalMs` to `0`. Defaults remain full visible launch/completion, normal session-ready behavior, progress every 30 seconds in pane mode, and no completion-triggered turn.
 
 ## Subagent workflow (required behavior)
 
