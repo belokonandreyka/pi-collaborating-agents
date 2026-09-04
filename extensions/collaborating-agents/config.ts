@@ -11,10 +11,10 @@ import type {
 const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
   messageHistoryLimit: 400,
   subagentLaunchMode: "process",
-  closeCompletedCmuxPanes: true,
+  closeCompletedPanes: true,
   // Off by default: a failed pane is kept on screen so the failure can be read
   // where it happened. Turn on when retries matter more than post-mortems.
-  closeFailedCmuxPanes: false,
+  closeFailedPanes: false,
   preserveOrchestratorPane: false,
   subagentProgressIntervalMs: 30_000,
   subagentCompletionDisplay: "full",
@@ -23,7 +23,7 @@ const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
 };
 
 function isSubagentLaunchMode(value: unknown): value is SubagentLaunchMode {
-  return value === "process" || value === "cmux-pane" || value === "herdr-pane";
+  return value === "process" || value === "herdr-pane";
 }
 
 function isSubagentCompletionDisplay(value: unknown): value is SubagentCompletionDisplay {
@@ -75,14 +75,14 @@ export function loadConfig(cwd: string): CollaboratingAgentsConfig {
     subagentLaunchMode: isSubagentLaunchMode(merged.subagentLaunchMode)
       ? merged.subagentLaunchMode
       : DEFAULT_CONFIG.subagentLaunchMode,
-    closeCompletedCmuxPanes:
-      typeof merged.closeCompletedCmuxPanes === "boolean"
-        ? merged.closeCompletedCmuxPanes
-        : DEFAULT_CONFIG.closeCompletedCmuxPanes,
-    closeFailedCmuxPanes:
-      typeof merged.closeFailedCmuxPanes === "boolean"
-        ? merged.closeFailedCmuxPanes
-        : DEFAULT_CONFIG.closeFailedCmuxPanes,
+    closeCompletedPanes:
+      typeof merged.closeCompletedPanes === "boolean"
+        ? merged.closeCompletedPanes
+        : DEFAULT_CONFIG.closeCompletedPanes,
+    closeFailedPanes:
+      typeof merged.closeFailedPanes === "boolean"
+        ? merged.closeFailedPanes
+        : DEFAULT_CONFIG.closeFailedPanes,
     preserveOrchestratorPane:
       typeof merged.preserveOrchestratorPane === "boolean"
         ? merged.preserveOrchestratorPane

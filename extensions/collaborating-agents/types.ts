@@ -84,7 +84,7 @@ export interface ExtensionState {
   activeSubagentRuns: number;
 }
 
-export type SubagentLaunchMode = "process" | "cmux-pane" | "herdr-pane";
+export type SubagentLaunchMode = "process" | "herdr-pane";
 
 export type SubagentCompletionDisplay = "full" | "hidden";
 
@@ -158,8 +158,8 @@ export type SubagentRunResolutionResult =
 export interface CollaboratingAgentsConfig {
   messageHistoryLimit: number;
   subagentLaunchMode: SubagentLaunchMode;
-  closeCompletedCmuxPanes: boolean;
-  closeFailedCmuxPanes: boolean;
+  closeCompletedPanes: boolean;
+  closeFailedPanes: boolean;
   preserveOrchestratorPane: boolean;
   /** Minimum gap between progress updates posted to the orchestrator, per child. 0 disables them. */
   subagentProgressIntervalMs: number;

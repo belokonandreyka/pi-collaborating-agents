@@ -165,8 +165,8 @@ describe("subagent completion payload helpers", () => {
   test("buildSubagentCompletionMessagePayload uses idle-grace wording for auto-closed panes", () => {
     const single = makeSpawnResult({
       name: "SwiftTiger-1a2b-ClearWave",
-      launchMode: "cmux-pane",
-      cmuxPaneClosed: true,
+      launchMode: "herdr-pane",
+      paneClosed: true,
     });
 
     const payload = buildSubagentCompletionMessagePayload({

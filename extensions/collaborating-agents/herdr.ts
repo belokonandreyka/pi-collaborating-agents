@@ -3,11 +3,11 @@ import { spawn } from "node:child_process";
 /**
  * Thin adapter over the `herdr` CLI (https://herdr.dev).
  *
- * Two differences from the cmux adapter shape the code below. First, herdr
+ * Two things shape the code below. First, herdr
  * answers every command with a JSON envelope on stdout, so no output scraping
  * is needed. Second, its hierarchy is workspace -> tab -> pane with no surface
  * layer, so a pane id is a subagent's whole identity; callers that also drive
- * cmux map both `paneRef` and `surfaceRef` onto that single id.
+ * callers map both `paneRef` and `surfaceRef` onto that single id.
  */
 
 export interface HerdrPane {

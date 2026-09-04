@@ -170,17 +170,17 @@ export function buildSubagentCompletionMessagePayload(
       const status = r.awaitingReply ? "awaiting reply" : r.exitCode === 0 ? "ok" : "failed";
       const output = (r.output || "(no output)").trim() || "(no output)";
       const runId = childRunIds[index];
-      const cmuxNote = isPaneLaunchMode(r.launchMode)
-        ? r.cmuxPaneClosed
+      const paneNote = isPaneLaunchMode(r.launchMode)
+        ? r.paneClosed
           ? "subagent pane auto-closed after turn-finished output plus idle grace"
-          : r.cmuxCloseError
-            ? `subagent pane close note: ${r.cmuxCloseError}`
+          : r.paneCloseError
+            ? `subagent pane close note: ${r.paneCloseError}`
             : undefined
         : undefined;
       return [
         `### ${index + 1}. ${displayName} (${status})`,
         runId ? `Run ID: ${runId}` : undefined,
-        cmuxNote ? `- ${cmuxNote}` : undefined,
+        paneNote ? `- ${paneNote}` : undefined,
         "",
         output,
         r.awaitingReply && runId
@@ -204,16 +204,16 @@ export function buildSubagentCompletionMessagePayload(
         ? `Received an error from ${runtimeLabel}.`
         : `Received final results from ${runtimeLabel}.`;
 
-    const cmuxNote = singleResult && isPaneLaunchMode(singleResult.launchMode)
-      ? singleResult.cmuxPaneClosed
+    const paneNote = singleResult && isPaneLaunchMode(singleResult.launchMode)
+      ? singleResult.paneClosed
         ? "subagent pane auto-closed after turn-finished output plus idle grace"
-        : singleResult.cmuxCloseError
-          ? `subagent pane close note: ${singleResult.cmuxCloseError}`
+        : singleResult.paneCloseError
+          ? `subagent pane close note: ${singleResult.paneCloseError}`
           : undefined
       : undefined;
 
     body = [
-      cmuxNote ? `- ${cmuxNote}` : undefined,
+      paneNote ? `- ${paneNote}` : undefined,
       (singleResult?.output || result.content[0]?.text || "(no output)").trim() || "(no output)",
       singleResult?.awaitingReply && runId
         ? `Answer it instead of re-spawning:\n- agent_message({ action: "reply", runId: "${runId}", message: "..." })`

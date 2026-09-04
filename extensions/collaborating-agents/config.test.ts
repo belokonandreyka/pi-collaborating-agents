@@ -11,8 +11,8 @@ const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 const DEFAULT_CONFIG = {
   messageHistoryLimit: 400,
   subagentLaunchMode: "process",
-  closeCompletedCmuxPanes: true,
-  closeFailedCmuxPanes: false,
+  closeCompletedPanes: true,
+  closeFailedPanes: false,
   preserveOrchestratorPane: false,
   subagentProgressIntervalMs: 30_000,
   subagentCompletionDisplay: "full",
@@ -54,19 +54,19 @@ describe("config loading", () => {
     expect(loadConfig(cwd)).toEqual(DEFAULT_CONFIG);
   });
 
-  test("closeFailedCmuxPanes can be turned on from config", () => {
+  test("closeFailedPanes can be turned on from config", () => {
     const home = makeTempDir("collab-config-home-failed-panes");
     setHome(home);
 
     const globalConfigPath = path.join(home, ".pi", "agent", "collaborating-agents.json");
     fs.mkdirSync(path.dirname(globalConfigPath), { recursive: true });
-    fs.writeFileSync(globalConfigPath, JSON.stringify({ closeFailedCmuxPanes: true }), "utf-8");
+    fs.writeFileSync(globalConfigPath, JSON.stringify({ closeFailedPanes: true }), "utf-8");
 
     const config = loadConfig(makeTempDir("collab-config-cwd-failed-panes"));
 
-    expect(config.closeFailedCmuxPanes).toBe(true);
+    expect(config.closeFailedPanes).toBe(true);
     // Turning it on must not disturb the completed-pane behaviour.
-    expect(config.closeCompletedCmuxPanes).toBe(true);
+    expect(config.closeCompletedPanes).toBe(true);
   });
 
   test("merges global and project configs with project taking precedence", () => {
@@ -88,8 +88,8 @@ describe("config loading", () => {
       projectConfigPath,
       JSON.stringify({
         messageHistoryLimit: 75,
-        subagentLaunchMode: "cmux-pane",
-        closeCompletedCmuxPanes: false,
+        subagentLaunchMode: "herdr-pane",
+        closeCompletedPanes: false,
         preserveOrchestratorPane: true,
         subagentProgressIntervalMs: 5_000,
         subagentCompletionDisplay: "hidden",
@@ -101,9 +101,9 @@ describe("config loading", () => {
 
     expect(loadConfig(cwd)).toEqual({
       messageHistoryLimit: 75,
-      subagentLaunchMode: "cmux-pane",
-      closeCompletedCmuxPanes: false,
-      closeFailedCmuxPanes: false,
+      subagentLaunchMode: "herdr-pane",
+      closeCompletedPanes: false,
+      closeFailedPanes: false,
       preserveOrchestratorPane: true,
       subagentProgressIntervalMs: 5_000,
       subagentCompletionDisplay: "hidden",

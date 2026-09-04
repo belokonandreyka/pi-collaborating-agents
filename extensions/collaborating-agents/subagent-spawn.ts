@@ -49,9 +49,9 @@ export interface SpawnResult {
   launchPrompt: string;
   launchSystemPromptSource?: string;
   launchSystemPromptLength?: number;
-  cmuxWorkspaceRef?: string;
-  cmuxPaneRef?: string;
-  cmuxSurfaceRef?: string;
+  workspaceRef?: string;
+  paneRef?: string;
+  surfaceRef?: string;
   launchEnv: {
     PI_AGENT_NAME: string;
     PI_COLLAB_SUBAGENT_DEPTH: string;
@@ -60,8 +60,8 @@ export interface SpawnResult {
   resolvedModel?: string;
   resolvedTools?: string[];
   coordinator?: string;
-  cmuxPaneClosed?: boolean;
-  cmuxCloseError?: string;
+  paneClosed?: boolean;
+  paneCloseError?: string;
   /**
    * Set when the child ended its turn on a question for its coordinator instead of a
    * report. The session and its pane are still alive; answer with `replyToSubagent`.
@@ -92,7 +92,7 @@ export const DEFAULT_SUBAGENT_TOOLS = ["read", "write", "edit", "bash", "agent_m
 
 const LOCAL_COLLABORATING_AGENTS_EXTENSION = path.join(path.dirname(fileURLToPath(import.meta.url)), "index.ts");
 const HOME_COLLABORATING_AGENTS_EXTENSION = path.join(os.homedir(), ".pi", "agent", "extensions", "collaborating-agents", "index.ts");
-const CMUX_PANE_IDLE_GRACE_MS = 1200;
+const PANE_IDLE_GRACE_MS = 1200;
 // An assistant error can be a transient provider failure the pane recovers from,
 // so an error must not settle the run as fast as a clean answer does. But waiting
 // for the exit marker alone is unbounded: a child that dies before its wrapper
@@ -100,10 +100,10 @@ const CMUX_PANE_IDLE_GRACE_MS = 1200;
 // no signal at all. A recovering pane keeps writing records, which resets the
 // activity clock, so total silence for this long after an error means it is not
 // coming back.
-const CMUX_PANE_ERROR_SETTLE_MS = 15_000;
-const CMUX_PANE_RESULT_TIMEOUT_MS = 600_000;
-const CMUX_PANE_MAX_IDLE_TIMEOUT_MULTIPLIER = 6;
-const CMUX_PANE_MAX_IDLE_TIMEOUT_BUFFER_MS = 60_000;
+const PANE_ERROR_SETTLE_MS = 15_000;
+const PANE_RESULT_TIMEOUT_MS = 600_000;
+const PANE_MAX_IDLE_TIMEOUT_MULTIPLIER = 6;
+const PANE_MAX_IDLE_TIMEOUT_BUFFER_MS = 60_000;
 
 type PaneLayoutRole = "orchestrator" | "subagent";
 type PaneSplitDirection = "right" | "down";
@@ -729,7 +729,7 @@ function buildLaunchCommand(args: string[]): string {
   return `pi ${args.map(quoteShellArg).join(" ")}`;
 }
 
-const CMUX_INHERITED_ENV_KEYS = [
+const INHERITED_PANE_ENV_KEYS = [
   "PATH",
   "HOME",
   "USERPROFILE",
@@ -739,9 +739,9 @@ const CMUX_INHERITED_ENV_KEYS = [
   "CLAUDE_CONFIG_DIR",
 ] as const;
 
-export function collectCmuxInheritedEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function collectInheritedPaneEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const inherited: Record<string, string> = {};
-  for (const key of CMUX_INHERITED_ENV_KEYS) {
+  for (const key of INHERITED_PANE_ENV_KEYS) {
     const value = source[key];
     if (typeof value === "string" && value.length > 0) inherited[key] = value;
   }
@@ -940,7 +940,7 @@ function createSubagentExitMarkerPath(sessionFile: string): string {
   return `${sessionFile}.exit`;
 }
 
-function buildCmuxPaneCommand(args: {
+function buildPaneCommand(args: {
   piArgs: string[];
   env: Record<string, string>;
   cwd: string;
@@ -964,7 +964,7 @@ function buildCmuxPaneCommand(args: {
   ].join('; ');
 }
 
-function createCmuxPaneLaunchScript(args: {
+function createPaneLaunchScript(args: {
   piArgs: string[];
   env: Record<string, string>;
   cwd: string;
@@ -977,7 +977,7 @@ function createCmuxPaneLaunchScript(args: {
 
   const safeChildName = args.childName.replace(/[^a-zA-Z0-9._-]+/g, "-");
   const scriptPath = path.join(scriptsDir, `${args.runId.slice(0, 8)}_${safeChildName}.sh`);
-  const scriptBody = buildCmuxPaneCommand(args);
+  const scriptBody = buildPaneCommand(args);
   const scriptContent = `#!/usr/bin/env bash\n${scriptBody}\n`;
   fs.writeFileSync(scriptPath, scriptContent, { encoding: "utf-8", mode: 0o700 });
 
@@ -1138,7 +1138,7 @@ function readSpawnSessionState(
   return { sessionId, terminalAssistantText, terminalError, pendingQuestion, progress: { toolCount, lastTool } };
 }
 
-// A cmux-pane subagent session can emit multiple assistant messages before it is
+// A pane subagent session can emit multiple assistant messages before it is
 // truly done (for example, an interrupted partial response followed by more tool
 // work and a later final answer). Assistant error messages can also be transient
 // provider failures that the pane recovers from. Wait for the latest successful
@@ -1160,16 +1160,16 @@ export async function waitForSettledSessionResult(args: {
   exitCode: number | null;
   timedOut: boolean;
 }> {
-  const idleGraceMs = Math.max(100, Math.floor(args.idleGraceMs ?? CMUX_PANE_IDLE_GRACE_MS));
-  const errorSettleMs = Math.max(idleGraceMs, Math.floor(args.errorSettleMs ?? CMUX_PANE_ERROR_SETTLE_MS));
+  const idleGraceMs = Math.max(100, Math.floor(args.idleGraceMs ?? PANE_IDLE_GRACE_MS));
+  const errorSettleMs = Math.max(idleGraceMs, Math.floor(args.errorSettleMs ?? PANE_ERROR_SETTLE_MS));
   // Treat timeoutMs as an inactivity budget instead of an absolute wall-clock
   // cap. Long-running research subagents can legitimately stay busy for well
   // over 10 minutes; as long as the session file keeps changing, keep waiting.
   const inactivityTimeoutMs = Math.max(idleGraceMs, Math.floor(args.timeoutMs));
   const hardTimeoutMs = Math.max(
     inactivityTimeoutMs,
-    inactivityTimeoutMs * CMUX_PANE_MAX_IDLE_TIMEOUT_MULTIPLIER,
-    inactivityTimeoutMs + CMUX_PANE_MAX_IDLE_TIMEOUT_BUFFER_MS,
+    inactivityTimeoutMs * PANE_MAX_IDLE_TIMEOUT_MULTIPLIER,
+    inactivityTimeoutMs + PANE_MAX_IDLE_TIMEOUT_BUFFER_MS,
   );
   const startedAt = Date.now();
   let activityDeadlineAt = startedAt + inactivityTimeoutMs;
@@ -1219,7 +1219,7 @@ export async function waitForSettledSessionResult(args: {
       // If the pane process has already exited cleanly, the session file is no
       // longer changing. Once we have a terminal assistant message, return
       // immediately instead of burning the full idle-grace budget. This keeps
-      // sequential synchronous cmux spawns fast while preserving the grace
+      // sequential synchronous pane spawns fast while preserving the grace
       // period for still-running panes that may emit more output.
       if (terminalAssistantText !== undefined) {
         return { sessionId, terminalAssistantText, exitCode, timedOut: false };
@@ -1271,131 +1271,6 @@ export async function waitForSettledSessionResult(args: {
   };
 }
 
-async function runCmuxCommand(args: string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return await new Promise((resolve) => {
-    const proc = spawn("cmux", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on("close", (code) => {
-      resolve({ exitCode: code ?? 0, stdout: stdout.trim(), stderr: stderr.trim() });
-    });
-
-    proc.on("error", (err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      resolve({ exitCode: 1, stdout: "", stderr: message });
-    });
-  });
-}
-
-function parseCmuxIdentify(jsonText: string): { workspaceRef: string; paneRef: string; surfaceRef: string } | null {
-  try {
-    const parsed = JSON.parse(jsonText) as {
-      caller?: { workspace_ref?: unknown; pane_ref?: unknown; surface_ref?: unknown };
-    };
-    const workspaceRef = typeof parsed.caller?.workspace_ref === "string" ? parsed.caller.workspace_ref : undefined;
-    const paneRef = typeof parsed.caller?.pane_ref === "string" ? parsed.caller.pane_ref : undefined;
-    const surfaceRef = typeof parsed.caller?.surface_ref === "string" ? parsed.caller.surface_ref : undefined;
-    if (!workspaceRef || !paneRef || !surfaceRef) return null;
-    return { workspaceRef, paneRef, surfaceRef };
-  } catch {
-    return null;
-  }
-}
-
-function parseCmuxNewSplit(stdout: string): { workspaceRef: string; surfaceRef: string } | null {
-  const workspaceMatch = stdout.match(/\b(workspace:\d+)\b/);
-  const surfaceMatch = stdout.match(/\b(surface:\d+)\b/);
-  if (!workspaceMatch || !surfaceMatch) return null;
-  return {
-    workspaceRef: workspaceMatch[1],
-    surfaceRef: surfaceMatch[1],
-  };
-}
-
-function extractCmuxRef(value: unknown, prefix: string): string | undefined {
-  return typeof value === "string" && value.startsWith(`${prefix}:`) ? value : undefined;
-}
-
-function extractCmuxRefsFromCollection(value: unknown, prefix: string, out: string[] = []): string[] {
-  if (typeof value === "string") {
-    const match = value.match(new RegExp(`\\b(${prefix}:\\d+)\\b`, "g"));
-    if (match) out.push(...match);
-    return out;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) extractCmuxRefsFromCollection(item, prefix, out);
-    return out;
-  }
-
-  if (!value || typeof value !== "object") return out;
-
-  const record = value as Record<string, unknown>;
-  const directKeys = ["ref", `${prefix}_ref`, `${prefix}Ref`, "id", `${prefix}_id`, `${prefix}Id`];
-  for (const key of directKeys) {
-    const ref = extractCmuxRef(record[key], prefix);
-    if (ref) out.push(ref);
-  }
-
-  for (const nestedValue of Object.values(record)) {
-    extractCmuxRefsFromCollection(nestedValue, prefix, out);
-  }
-
-  return out;
-}
-
-function uniqueCmuxRefs(refs: string[]): string[] {
-  return [...new Set(refs)];
-}
-
-async function listCmuxPaneRefs(workspaceRef: string): Promise<string[] | null> {
-  const listed = await runCmuxCommand(["--json", "list-panes", "--workspace", workspaceRef]);
-  if (listed.exitCode !== 0) return null;
-
-  const refs = uniqueCmuxRefs(extractCmuxRefsFromCollection(listed.stdout, "pane"));
-  if (refs.length > 0) return refs;
-
-  const matches = listed.stdout.match(/\bpane:\d+\b/g);
-  return matches ? uniqueCmuxRefs(matches) : [];
-}
-
-async function listCmuxPaneSurfaceRefs(workspaceRef: string, paneRef: string): Promise<string[] | null> {
-  const listed = await runCmuxCommand(["--json", "list-pane-surfaces", "--workspace", workspaceRef, "--pane", paneRef]);
-  if (listed.exitCode !== 0) return null;
-
-  const refs = uniqueCmuxRefs(extractCmuxRefsFromCollection(listed.stdout, "surface"));
-  if (refs.length > 0) return refs;
-
-  const matches = listed.stdout.match(/\bsurface:\d+\b/g);
-  return matches ? uniqueCmuxRefs(matches) : [];
-}
-
-async function snapshotCmuxWorkspace(workspaceRef: string): Promise<Map<string, string[]>> {
-  const paneRefs = await listCmuxPaneRefs(workspaceRef);
-  if (!paneRefs || paneRefs.length === 0) return new Map();
-
-  const snapshot = new Map<string, string[]>();
-  for (const paneRef of paneRefs) {
-    const surfaceRefs = await listCmuxPaneSurfaceRefs(workspaceRef, paneRef);
-    if (!surfaceRefs) continue;
-    snapshot.set(paneRef, [...surfaceRefs]);
-  }
-
-  return snapshot;
-}
-
 function findSurfacePaneRef(snapshot: Map<string, string[]>, surfaceRef: string): string | undefined {
   for (const [paneRef, surfaceRefs] of snapshot.entries()) {
     if (surfaceRefs.includes(surfaceRef)) return paneRef;
@@ -1430,272 +1305,6 @@ function syncPaneLayoutStateWithSnapshot(state: PaneWorkspaceLayoutState, snapsh
     orchestratorLeaf.paneRef = actualOrchestratorPane;
     state.orchestratorPaneRef = actualOrchestratorPane;
   }
-}
-
-async function moveCmuxSurfaceToPane(args: {
-  workspaceRef: string;
-  surfaceRef: string;
-  targetPaneRef: string;
-}): Promise<boolean> {
-  const moved = await runCmuxCommand([
-    "move-surface",
-    "--workspace",
-    args.workspaceRef,
-    "--surface",
-    args.surfaceRef,
-    "--pane",
-    args.targetPaneRef,
-  ]);
-  return moved.exitCode === 0;
-}
-
-async function reorderCmuxSurfaceBefore(args: {
-  workspaceRef: string;
-  surfaceRef: string;
-  beforeSurfaceRef: string;
-}): Promise<boolean> {
-  const reordered = await runCmuxCommand([
-    "reorder-surface",
-    "--workspace",
-    args.workspaceRef,
-    "--surface",
-    args.surfaceRef,
-    "--before",
-    args.beforeSurfaceRef,
-  ]);
-  return reordered.exitCode === 0;
-}
-
-async function rebalanceCmuxWorkspaceSurfaces(
-  state: PaneWorkspaceLayoutState,
-  preserveOrchestratorPane: boolean,
-): Promise<void> {
-  // Phase 2: after choosing a balanced split target, reconcile the live cmux
-  // workspace back to the planned pane assignment using move/reorder operations.
-  const snapshot = await snapshotCmuxWorkspace(state.workspaceRef);
-  if (snapshot.size === 0) return;
-
-  const desiredLeaves = collectPaneLayoutLeaves(state.root);
-  const surfaceToPane = new Map<string, string>();
-  for (const [paneRef, surfaceRefs] of snapshot.entries()) {
-    for (const surfaceRef of surfaceRefs) {
-      surfaceToPane.set(surfaceRef, paneRef);
-    }
-  }
-
-  for (const leaf of desiredLeaves) {
-    const currentPaneRef = surfaceToPane.get(leaf.surfaceRef);
-    if (!currentPaneRef || currentPaneRef === leaf.paneRef) continue;
-    if (!snapshot.has(leaf.paneRef)) continue;
-    const liveOrchestratorPaneRef = surfaceToPane.get(state.orchestratorSurfaceRef);
-    if (
-      preserveOrchestratorPane
-      && leaf.role === "subagent"
-      && (leaf.paneRef === state.orchestratorPaneRef || leaf.paneRef === liveOrchestratorPaneRef)
-    ) continue;
-
-    const targetPaneSurfaces = snapshot.get(leaf.paneRef) ?? [];
-    const orderAnchor = targetPaneSurfaces.find((surfaceRef) => surfaceRef !== leaf.surfaceRef);
-
-    const moved = await moveCmuxSurfaceToPane({
-      workspaceRef: state.workspaceRef,
-      surfaceRef: leaf.surfaceRef,
-      targetPaneRef: leaf.paneRef,
-    });
-    if (!moved) continue;
-
-    const sourcePaneSurfaces = snapshot.get(currentPaneRef);
-    if (sourcePaneSurfaces) {
-      snapshot.set(
-        currentPaneRef,
-        sourcePaneSurfaces.filter((surfaceRef) => surfaceRef !== leaf.surfaceRef),
-      );
-    }
-    snapshot.set(leaf.paneRef, [...targetPaneSurfaces.filter((surfaceRef) => surfaceRef !== leaf.surfaceRef), leaf.surfaceRef]);
-    surfaceToPane.set(leaf.surfaceRef, leaf.paneRef);
-
-    if (orderAnchor) {
-      const reordered = await reorderCmuxSurfaceBefore({
-        workspaceRef: state.workspaceRef,
-        surfaceRef: leaf.surfaceRef,
-        beforeSurfaceRef: orderAnchor,
-      });
-      if (reordered) {
-        const updatedTargetPaneSurfaces = snapshot.get(leaf.paneRef) ?? [];
-        snapshot.set(leaf.paneRef, [leaf.surfaceRef, ...updatedTargetPaneSurfaces.filter((surfaceRef) => surfaceRef !== leaf.surfaceRef)]);
-      }
-    }
-  }
-}
-
-async function createCmuxSplit(args: {
-  workspaceRef: string;
-  targetPaneRef: string;
-  targetSurfaceRef: string;
-  direction: PaneSplitDirection;
-}): Promise<
-  | {
-      ok: true;
-      stdout: string;
-    }
-  | {
-      ok: false;
-      error: string;
-    }
-> {
-  const attempts: string[][] = [
-    ["new-split", args.direction, "--workspace", args.workspaceRef, "--panel", args.targetPaneRef],
-    ["new-split", args.direction, "--workspace", args.workspaceRef, "--surface", args.targetSurfaceRef],
-  ];
-
-  const seen = new Set<string>();
-  const errors: string[] = [];
-
-  for (const commandArgs of attempts) {
-    const key = commandArgs.join("\u0000");
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    const result = await runCmuxCommand(commandArgs);
-    if (result.exitCode === 0) {
-      return { ok: true, stdout: result.stdout };
-    }
-
-    errors.push(result.stderr || result.stdout || `cmux ${commandArgs[0]} failed`);
-  }
-
-  return { ok: false, error: errors.filter(Boolean).join(" | ") || "Failed to create cmux pane" };
-}
-
-async function launchCmuxPane(args: {
-  scriptPath: string;
-  preserveOrchestratorPane: boolean;
-}): Promise<
-  | {
-      ok: true;
-      workspaceRef: string;
-      paneRef: string;
-      surfaceRef: string;
-    }
-  | {
-      ok: false;
-      error: string;
-    }
-> {
-  return await withPaneLayoutLock(async () => {
-    const identify = await runCmuxCommand(["identify", "--json"]);
-    if (identify.exitCode !== 0) {
-      return { ok: false, error: identify.stderr || identify.stdout || "Failed to identify current cmux surface" };
-    }
-
-    const callerContext = parseCmuxIdentify(identify.stdout);
-    if (!callerContext) {
-      return { ok: false, error: "cmux pane launch requires running inside a cmux terminal surface" };
-    }
-
-    const layoutState = getOrCreatePaneWorkspaceLayout(callerContext);
-    const beforeSnapshot = await snapshotCmuxWorkspace(callerContext.workspaceRef);
-    if (beforeSnapshot.size > 0) {
-      syncPaneLayoutStateWithSnapshot(layoutState, beforeSnapshot);
-    }
-    let splitTarget = choosePaneSplitLeaf(layoutState, args.preserveOrchestratorPane);
-    let splitDirection = choosePaneSplitDirection(splitTarget);
-
-    let split = await createCmuxSplit({
-      workspaceRef: callerContext.workspaceRef,
-      targetPaneRef: splitTarget.paneRef,
-      targetSurfaceRef: splitTarget.surfaceRef,
-      direction: splitDirection,
-    });
-
-    if (!split.ok && splitTarget.role !== "orchestrator") {
-      removePaneFromLayout(callerContext.workspaceRef, {
-        paneRef: splitTarget.paneRef,
-        surfaceRef: splitTarget.surfaceRef,
-      });
-      splitTarget = choosePaneSplitLeaf(layoutState, args.preserveOrchestratorPane);
-      splitDirection = choosePaneSplitDirection(splitTarget);
-      split = await createCmuxSplit({
-        workspaceRef: callerContext.workspaceRef,
-        targetPaneRef: splitTarget.paneRef,
-        targetSurfaceRef: splitTarget.surfaceRef,
-        direction: splitDirection,
-      });
-    }
-
-    if (!split.ok) {
-      return { ok: false, error: split.error };
-    }
-
-    const created = parseCmuxNewSplit(split.stdout);
-    if (!created) {
-      return { ok: false, error: `Unexpected cmux new-split output: ${split.stdout || "(empty)"}` };
-    }
-
-    const paneIdentify = await runCmuxCommand([
-      "identify",
-      "--json",
-      "--workspace",
-      created.workspaceRef,
-      "--surface",
-      created.surfaceRef,
-    ]);
-    if (paneIdentify.exitCode !== 0) {
-      return { ok: false, error: paneIdentify.stderr || paneIdentify.stdout || "Failed to identify cmux pane" };
-    }
-
-    const paneContext = parseCmuxIdentify(paneIdentify.stdout);
-    if (!paneContext) {
-      return { ok: false, error: "Failed to resolve cmux pane refs after split" };
-    }
-
-    applyPaneSplitToLayout(layoutState, splitTarget, paneContext.paneRef, paneContext.surfaceRef);
-
-    const send = await runCmuxCommand([
-      "send",
-      "--workspace",
-      paneContext.workspaceRef,
-      "--surface",
-      paneContext.surfaceRef,
-      `${args.scriptPath}\n`,
-    ]);
-    if (send.exitCode !== 0) {
-      return { ok: false, error: send.stderr || send.stdout || "Failed to send command to cmux pane" };
-    }
-
-    await rebalanceCmuxWorkspaceSurfaces(layoutState, args.preserveOrchestratorPane);
-
-    const postRebalanceIdentify = await runCmuxCommand([
-      "identify",
-      "--json",
-      "--workspace",
-      paneContext.workspaceRef,
-      "--surface",
-      paneContext.surfaceRef,
-    ]);
-    const postRebalanceContext =
-      postRebalanceIdentify.exitCode === 0 ? parseCmuxIdentify(postRebalanceIdentify.stdout) : null;
-    if (postRebalanceContext) {
-      const newPaneLeaf = findPaneLayoutLeaf(layoutState.root, (leaf) => leaf.surfaceRef === paneContext.surfaceRef);
-      if (newPaneLeaf) newPaneLeaf.paneRef = postRebalanceContext.paneRef;
-      paneContext.paneRef = postRebalanceContext.paneRef;
-    }
-
-    return {
-      ok: true,
-      workspaceRef: paneContext.workspaceRef,
-      paneRef: paneContext.paneRef,
-      surfaceRef: paneContext.surfaceRef,
-    };
-  });
-}
-
-async function closeCmuxSurface(surfaceRef: string): Promise<{ ok: true } | { ok: false; error: string }> {
-  const close = await runCmuxCommand(["close-surface", "--surface", surfaceRef]);
-  if (close.exitCode !== 0) {
-    return { ok: false, error: close.stderr || close.stdout || "Failed to close cmux surface" };
-  }
-  return { ok: true };
 }
 
 /**
@@ -1803,31 +1412,22 @@ async function launchHerdrPane(args: {
 
 /** True for the launch modes that put a subagent in its own terminal pane. */
 export function isPaneLaunchMode(mode: SubagentLaunchMode): boolean {
-  return mode === "cmux-pane" || mode === "herdr-pane";
+  return mode === "herdr-pane";
 }
 
 async function launchSubagentPane(
-  mode: SubagentLaunchMode,
   args: { scriptPath: string; preserveOrchestratorPane: boolean; cwd: string },
 ): Promise<
   { ok: true; workspaceRef: string; paneRef: string; surfaceRef: string } | { ok: false; error: string }
 > {
-  if (mode === "herdr-pane") return await launchHerdrPane(args);
-  return await launchCmuxPane({
-    scriptPath: args.scriptPath,
-    preserveOrchestratorPane: args.preserveOrchestratorPane,
-  });
+  return await launchHerdrPane(args);
 }
 
 async function closeSubagentPane(
-  mode: SubagentLaunchMode,
   refs: { paneRef?: string; surfaceRef: string },
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (mode === "herdr-pane") {
-    const closed = await herdrClosePane(refs.paneRef ?? refs.surfaceRef);
-    return closed.ok ? { ok: true } : { ok: false, error: closed.error };
-  }
-  return await closeCmuxSurface(refs.surfaceRef);
+  const closed = await herdrClosePane(refs.paneRef ?? refs.surfaceRef);
+  return closed.ok ? { ok: true } : { ok: false, error: closed.error };
 }
 
 /**
@@ -1835,27 +1435,11 @@ async function closeSubagentPane(
  * backends degrade to an empty string rather than surfacing their own errors.
  */
 async function readSubagentPaneScreen(
-  mode: SubagentLaunchMode,
-  refs: { workspaceRef?: string; paneRef?: string; surfaceRef?: string },
+  refs: { paneRef?: string; surfaceRef?: string },
   lines: number,
 ): Promise<string> {
-  if (mode === "herdr-pane") {
-    const paneRef = refs.paneRef ?? refs.surfaceRef;
-    return paneRef ? await herdrReadPane(paneRef, lines) : "";
-  }
-
-  if (!refs.workspaceRef || !refs.surfaceRef) return "";
-  const screen = await runCmuxCommand([
-    "read-screen",
-    "--workspace",
-    refs.workspaceRef,
-    "--surface",
-    refs.surfaceRef,
-    "--scrollback",
-    "--lines",
-    String(lines),
-  ]);
-  return screen.stdout;
+  const paneRef = refs.paneRef ?? refs.surfaceRef;
+  return paneRef ? await herdrReadPane(paneRef, lines) : "";
 }
 
 /**
@@ -1904,7 +1488,7 @@ export async function replyToSubagent(args: {
   const settled = await waitForSettledSessionResult({
     sessionFile: args.sessionFile,
     exitMarkerPath,
-    timeoutMs: args.timeoutMs ?? CMUX_PANE_RESULT_TIMEOUT_MS,
+    timeoutMs: args.timeoutMs ?? PANE_RESULT_TIMEOUT_MS,
     parentAgentName: args.parentAgentName,
     onUpdate: (state) => {
       if (state.progress) args.onProgress?.(state.progress);
@@ -1934,10 +1518,10 @@ export async function runSpawnTask(
     parentAgentName?: string;
     launchDelayMs?: number;
     launchMode?: SubagentLaunchMode;
-    closeCompletedCmuxPane?: boolean;
-    closeFailedCmuxPane?: boolean;
+    closeCompletedPane?: boolean;
+    closeFailedPane?: boolean;
     preserveOrchestratorPane?: boolean;
-    cmuxResultTimeoutMs?: number;
+    paneResultTimeoutMs?: number;
     onLaunch?: (launch: SpawnResult) => void | Promise<void>;
     onSessionMetadata?: SpawnSessionMetadataCallback;
     onProgress?: SubagentProgressCallback;
@@ -2018,7 +1602,7 @@ export async function runSpawnTask(
   }
 
   const launchDelayMs = Math.max(0, Math.floor(options.launchDelayMs ?? 0));
-  const cmuxResultTimeoutMs = Math.max(100, Math.floor(options.cmuxResultTimeoutMs ?? CMUX_PANE_RESULT_TIMEOUT_MS));
+  const paneResultTimeoutMs = Math.max(100, Math.floor(options.paneResultTimeoutMs ?? PANE_RESULT_TIMEOUT_MS));
 
   const result: SpawnResult = {
     agent: task.agent,
@@ -2052,12 +1636,12 @@ export async function runSpawnTask(
 
   if (isPaneLaunchMode(result.launchMode)) {
     const paneLaunchEnv: Record<string, string> = {
-      ...collectCmuxInheritedEnv(),
+      ...collectInheritedPaneEnv(),
       PI_AGENT_NAME: result.launchEnv.PI_AGENT_NAME,
       PI_COLLAB_SUBAGENT_DEPTH: result.launchEnv.PI_COLLAB_SUBAGENT_DEPTH,
     };
 
-    const paneLaunchScript = createCmuxPaneLaunchScript({
+    const paneLaunchScript = createPaneLaunchScript({
       piArgs: args,
       env: paneLaunchEnv,
       cwd,
@@ -2066,7 +1650,7 @@ export async function runSpawnTask(
       runId: options.runId,
     });
 
-    const paneLaunch = await launchSubagentPane(result.launchMode, {
+    const paneLaunch = await launchSubagentPane({
       scriptPath: paneLaunchScript.command,
       preserveOrchestratorPane: options.preserveOrchestratorPane ?? false,
       cwd,
@@ -2084,37 +1668,37 @@ export async function runSpawnTask(
       return result;
     }
 
-    result.cmuxWorkspaceRef = paneLaunch.workspaceRef;
-    result.cmuxPaneRef = paneLaunch.paneRef;
-    result.cmuxSurfaceRef = paneLaunch.surfaceRef;
+    result.workspaceRef = paneLaunch.workspaceRef;
+    result.paneRef = paneLaunch.paneRef;
+    result.surfaceRef = paneLaunch.surfaceRef;
 
     // Every terminal outcome now runs through one release point instead of the
     // failure paths returning early and leaking the pane. A failed pane is still
     // kept on screen by default so the failure can be read where it happened;
-    // `closeFailedCmuxPanes` opts into closing it, which is what an orchestrator
+    // `closeFailedPanes` opts into closing it, which is what an orchestrator
     // that retries after a provider error wants, so retries stop stacking fresh
     // panes on top of dead ones. Failure detail survives in the durable run
     // record and the session file either way.
     const releasePane = async (outcome: "completed" | "failed" = "completed"): Promise<SpawnResult> => {
-      if (outcome === "failed" && options.closeFailedCmuxPane !== true) return result;
-      if (outcome === "completed" && options.closeCompletedCmuxPane === false) return result;
-      if (!result.cmuxSurfaceRef) return result;
-      const closeResult = await closeSubagentPane(result.launchMode, {
-        paneRef: result.cmuxPaneRef,
-        surfaceRef: result.cmuxSurfaceRef,
+      if (outcome === "failed" && options.closeFailedPane !== true) return result;
+      if (outcome === "completed" && options.closeCompletedPane === false) return result;
+      if (!result.surfaceRef) return result;
+      const closeResult = await closeSubagentPane({
+        paneRef: result.paneRef,
+        surfaceRef: result.surfaceRef,
       });
       if (closeResult.ok) {
-        result.cmuxPaneClosed = true;
-        if (result.cmuxWorkspaceRef) {
+        result.paneClosed = true;
+        if (result.workspaceRef) {
           await withPaneLayoutLock(async () => {
-            removePaneFromLayout(result.cmuxWorkspaceRef!, {
-              paneRef: result.cmuxPaneRef,
-              surfaceRef: result.cmuxSurfaceRef,
+            removePaneFromLayout(result.workspaceRef!, {
+              paneRef: result.paneRef,
+              surfaceRef: result.surfaceRef,
             });
           });
         }
       } else {
-        result.cmuxCloseError = closeResult.error;
+        result.paneCloseError = closeResult.error;
       }
       return result;
     };
@@ -2134,11 +1718,11 @@ export async function runSpawnTask(
     const sessionFileWait = await waitForSessionFileOrExitMarker({
       sessionFile: result.sessionFile!,
       exitMarkerPath: exitMarkerPath!,
-      timeoutMs: cmuxResultTimeoutMs,
+      timeoutMs: paneResultTimeoutMs,
     });
     if (!sessionFileWait.fileExists) {
       result.exitCode = sessionFileWait.exitCode ?? 1;
-      const paneScreen = await readSubagentPaneScreen(result.launchMode, result, 120);
+      const paneScreen = await readSubagentPaneScreen(result, 120);
       const defaultError = sessionFileWait.exitCode !== null
         ? `${result.launchMode} subagent exited with code ${sessionFileWait.exitCode} before creating its session file`
         : "Timed out waiting for subagent session file in pane";
@@ -2150,7 +1734,7 @@ export async function runSpawnTask(
     const sessionState = await waitForSettledSessionResult({
       sessionFile: result.sessionFile!,
       exitMarkerPath: exitMarkerPath!,
-      timeoutMs: cmuxResultTimeoutMs,
+      timeoutMs: paneResultTimeoutMs,
       parentAgentName: options.parentAgentName,
       onUpdate: (state) => {
         if (state.sessionId) {
@@ -2186,7 +1770,7 @@ export async function runSpawnTask(
       result.exitCode = sessionState.exitCode;
 
       if (sessionState.terminalAssistantText === undefined) {
-        const paneScreen = await readSubagentPaneScreen(result.launchMode, result, 200);
+        const paneScreen = await readSubagentPaneScreen(result, 200);
         if (paneScreen) {
           result.output = paneScreen;
           result.error = paneScreen;
@@ -2198,7 +1782,7 @@ export async function runSpawnTask(
     }
 
     if (sessionState.terminalAssistantText === undefined || sessionState.timedOut) {
-      const paneScreen = await readSubagentPaneScreen(result.launchMode, result, 200);
+      const paneScreen = await readSubagentPaneScreen(result, 200);
       result.exitCode = 1;
       result.error = paneScreen || "Timed out waiting for settled subagent response in pane";
       result.output = result.error;
