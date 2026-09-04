@@ -62,6 +62,11 @@ export interface SpawnResult {
   coordinator?: string;
   cmuxPaneClosed?: boolean;
   cmuxCloseError?: string;
+  /**
+   * Set when the child ended its turn on a question for its coordinator instead of a
+   * report. The session and its pane are still alive; answer with `replyToSubagent`.
+   */
+  awaitingReply?: string;
 }
 
 export const PROCESS_MODE_SESSION_FILE_UNAVAILABLE_REASON =
@@ -96,6 +101,7 @@ const CMUX_PANE_IDLE_GRACE_MS = 1200;
 // activity clock, so total silence for this long after an error means it is not
 // coming back.
 const CMUX_PANE_ERROR_SETTLE_MS = 15_000;
+const CMUX_PANE_RESULT_TIMEOUT_MS = 600_000;
 const CMUX_PANE_MAX_IDLE_TIMEOUT_MULTIPLIER = 6;
 const CMUX_PANE_MAX_IDLE_TIMEOUT_BUFFER_MS = 60_000;
 
@@ -650,6 +656,38 @@ function extractToolCallNames(content: unknown): string[] {
     .map((c) => c.name as string);
 }
 
+// A child that asks its parent a question and then falls silent looks exactly like
+// a child that finished: both end a turn and stop touching the session file. The
+// only thing that tells them apart is the call itself, so pull the question text
+// out of an `agent_message` send addressed at the parent.
+function extractParentQuestion(content: unknown, parentAgentName?: string): string | null {
+  if (!Array.isArray(content)) return null;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const record = block as Record<string, unknown>;
+    if (record.type !== "toolCall" || record.name !== "agent_message") continue;
+
+    let args = record.arguments ?? record.input;
+    if (typeof args === "string") {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        continue;
+      }
+    }
+    if (!args || typeof args !== "object") continue;
+    const call = args as Record<string, unknown>;
+    if (call.action !== "send") continue;
+
+    // A send to a sibling is collaboration, not a question for the coordinator.
+    if (parentAgentName && typeof call.to === "string" && call.to !== parentAgentName) continue;
+
+    const message = typeof call.message === "string" ? call.message.trim() : "";
+    if (message) return message;
+  }
+  return null;
+}
+
 function formatAssistantError(message: Record<string, unknown>): string {
   const errorMessage = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "";
   const diagnosticMessage = Array.isArray(message.diagnostics)
@@ -980,12 +1018,17 @@ function didFileChange(current: FileChangeToken | null, previous: FileChangeToke
   return Math.abs(current.mtimeMs - previous.mtimeMs) > 0.5 || current.size !== previous.size;
 }
 
-function parseSessionMessageLine(line: string): {
+function parseSessionMessageLine(
+  line: string,
+  parentAgentName?: string,
+): {
   sessionId?: string;
   terminalAssistantMessage?: boolean;
   terminalAssistantText?: string;
   terminalError?: string;
   toolNames?: string[];
+  userMessage?: boolean;
+  parentQuestion?: string;
 } {
   let event: unknown;
   try {
@@ -1007,6 +1050,9 @@ function parseSessionMessageLine(line: string): {
   }
 
   const message = parsed.message as Record<string, unknown>;
+  // A user message is the answer arriving — from the coordinator's reply, or from a
+  // human typing into the pane. Either way it clears any question left outstanding.
+  if (message.role === "user") return { userMessage: true };
   if (message.role !== "assistant") return {};
 
   const stopReason =
@@ -1020,7 +1066,12 @@ function parseSessionMessageLine(line: string): {
   // A toolUse message is not terminal, but it is the only record of what the
   // child is actually doing right now. Surface the tool names for progress
   // reporting instead of discarding the message.
-  if (stopReason === "toolUse") return { toolNames: extractToolCallNames(message.content) };
+  if (stopReason === "toolUse") {
+    return {
+      toolNames: extractToolCallNames(message.content),
+      parentQuestion: extractParentQuestion(message.content, parentAgentName) ?? undefined,
+    };
+  }
 
   const terminalAssistantText = extractAssistantText(message.content);
   if (stopReason === "error" || typeof message.errorMessage === "string") {
@@ -1037,11 +1088,15 @@ function parseSessionMessageLine(line: string): {
   };
 }
 
-function readSpawnSessionState(sessionFile: string): {
+function readSpawnSessionState(
+  sessionFile: string,
+  parentAgentName?: string,
+): {
   sessionId?: string;
   terminalAssistantText?: string;
   terminalError?: string;
   progress?: SubagentProgress;
+  pendingQuestion?: string;
 } {
   if (!fs.existsSync(sessionFile)) return {};
 
@@ -1057,22 +1112,30 @@ function readSpawnSessionState(sessionFile: string): {
   let terminalError: string | undefined;
   let toolCount = 0;
   let lastTool: string | undefined;
+  let pendingQuestion: string | undefined;
 
   for (const line of content.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    const parsed = parseSessionMessageLine(line);
+    const parsed = parseSessionMessageLine(line, parentAgentName);
     if (parsed.sessionId) sessionId = parsed.sessionId;
     if (parsed.toolNames?.length) {
       toolCount += parsed.toolNames.length;
       lastTool = parsed.toolNames[parsed.toolNames.length - 1];
+      // Any later tool call means the child asked and then carried on by itself
+      // rather than waiting, so there is nothing outstanding to answer.
+      if (!parsed.parentQuestion) pendingQuestion = undefined;
     }
+    if (parsed.parentQuestion) pendingQuestion = parsed.parentQuestion;
+    // The task prompt itself is a user message, so this also clears a question the
+    // child somehow asked before reading its task.
+    if (parsed.userMessage) pendingQuestion = undefined;
     if (parsed.terminalAssistantMessage) {
       terminalAssistantText = parsed.terminalAssistantText;
       terminalError = parsed.terminalError;
     }
   }
 
-  return { sessionId, terminalAssistantText, terminalError, progress: { toolCount, lastTool } };
+  return { sessionId, terminalAssistantText, terminalError, pendingQuestion, progress: { toolCount, lastTool } };
 }
 
 // A cmux-pane subagent session can emit multiple assistant messages before it is
@@ -1087,11 +1150,13 @@ export async function waitForSettledSessionResult(args: {
   timeoutMs: number;
   idleGraceMs?: number;
   errorSettleMs?: number;
+  parentAgentName?: string;
   onUpdate?: (state: { sessionId?: string; progress?: SubagentProgress }) => void;
 }): Promise<{
   sessionId?: string;
   terminalAssistantText?: string;
   terminalError?: string;
+  awaitingReply?: string;
   exitCode: number | null;
   timedOut: boolean;
 }> {
@@ -1114,6 +1179,7 @@ export async function waitForSettledSessionResult(args: {
   let sessionId: string | undefined;
   let terminalAssistantText: string | undefined;
   let terminalError: string | undefined;
+  let pendingQuestion: string | undefined;
   let lastReportedToolCount = 0;
 
   while (Date.now() - startedAt < hardTimeoutMs && Date.now() < activityDeadlineAt) {
@@ -1125,7 +1191,8 @@ export async function waitForSettledSessionResult(args: {
     }
 
     if (lastParsedToken === null || didFileChange(currentToken, lastParsedToken)) {
-      const state = readSpawnSessionState(args.sessionFile);
+      const state = readSpawnSessionState(args.sessionFile, args.parentAgentName);
+      pendingQuestion = state.pendingQuestion;
       if (state.sessionId) {
         sessionId = state.sessionId;
         args.onUpdate?.({ sessionId });
@@ -1157,6 +1224,18 @@ export async function waitForSettledSessionResult(args: {
       if (terminalAssistantText !== undefined) {
         return { sessionId, terminalAssistantText, exitCode, timedOut: false };
       }
+    }
+
+    // An outstanding question outranks the idle check: the child is quiet because it
+    // is waiting for the coordinator, not because it is done. Hand the question back
+    // with the session still alive so the answer can be delivered into it.
+    if (
+      pendingQuestion !== undefined &&
+      exitCode === null &&
+      terminalError === undefined &&
+      Date.now() - lastActivityAt >= idleGraceMs
+    ) {
+      return { sessionId, terminalAssistantText, awaitingReply: pendingQuestion, exitCode, timedOut: false };
     }
 
     if (terminalAssistantText !== undefined && terminalError === undefined && Date.now() - lastActivityAt >= idleGraceMs) {
@@ -1779,6 +1858,70 @@ async function readSubagentPaneScreen(
   return screen.stdout;
 }
 
+/**
+ * Answer a child that stopped on a question and keep waiting for its real result.
+ *
+ * The answer is typed into the child's live pane, which the TUI reads as ordinary
+ * user input and turns into a new turn — so the child keeps everything it had
+ * already worked out instead of being replaced by a fresh spawn.
+ */
+export async function replyToSubagent(args: {
+  launchMode: SubagentLaunchMode;
+  paneRef?: string;
+  surfaceRef?: string;
+  sessionFile: string;
+  message: string;
+  timeoutMs?: number;
+  parentAgentName?: string;
+  onProgress?: (progress: SubagentProgress) => void;
+}): Promise<
+  | { ok: true; output?: string; awaitingReply?: string; sessionId?: string; timedOut: boolean }
+  | { ok: false; error: string }
+> {
+  const answer = args.message.replace(/\s*\n\s*/g, " ").trim();
+  if (!answer) return { ok: false, error: "Reply message is empty." };
+
+  if (args.launchMode !== "herdr-pane") {
+    return {
+      ok: false,
+      error: `Replying to a live subagent is implemented for herdr-pane only; this one ran under ${args.launchMode}.`,
+    };
+  }
+
+  const paneRef = args.paneRef ?? args.surfaceRef;
+  if (!paneRef) return { ok: false, error: "No pane reference recorded for this subagent." };
+
+  // A pane that has already gone means the child exited between the question and
+  // the answer; say so rather than reporting a delivery that never happened.
+  const exitMarkerPath = createSubagentExitMarkerPath(args.sessionFile);
+  if (readExitMarkerCode(exitMarkerPath) !== null) {
+    return { ok: false, error: "The subagent has already exited; its session cannot be resumed." };
+  }
+
+  const delivered = await herdrSendLine(paneRef, answer);
+  if (!delivered.ok) return { ok: false, error: `Could not deliver the reply: ${delivered.error}` };
+
+  const settled = await waitForSettledSessionResult({
+    sessionFile: args.sessionFile,
+    exitMarkerPath,
+    timeoutMs: args.timeoutMs ?? CMUX_PANE_RESULT_TIMEOUT_MS,
+    parentAgentName: args.parentAgentName,
+    onUpdate: (state) => {
+      if (state.progress) args.onProgress?.(state.progress);
+    },
+  });
+
+  if (settled.terminalError !== undefined) return { ok: false, error: settled.terminalError };
+
+  return {
+    ok: true,
+    output: settled.terminalAssistantText,
+    awaitingReply: settled.awaitingReply,
+    sessionId: settled.sessionId,
+    timedOut: settled.timedOut,
+  };
+}
+
 export async function runSpawnTask(
   runtimeCwd: string,
   task: SpawnTask,
@@ -1875,7 +2018,7 @@ export async function runSpawnTask(
   }
 
   const launchDelayMs = Math.max(0, Math.floor(options.launchDelayMs ?? 0));
-  const cmuxResultTimeoutMs = Math.max(100, Math.floor(options.cmuxResultTimeoutMs ?? 600_000));
+  const cmuxResultTimeoutMs = Math.max(100, Math.floor(options.cmuxResultTimeoutMs ?? CMUX_PANE_RESULT_TIMEOUT_MS));
 
   const result: SpawnResult = {
     agent: task.agent,
@@ -2008,6 +2151,7 @@ export async function runSpawnTask(
       sessionFile: result.sessionFile!,
       exitMarkerPath: exitMarkerPath!,
       timeoutMs: cmuxResultTimeoutMs,
+      parentAgentName: options.parentAgentName,
       onUpdate: (state) => {
         if (state.sessionId) {
           result.sessionId = state.sessionId;
@@ -2017,6 +2161,16 @@ export async function runSpawnTask(
       },
     });
     await sessionMetadata.flush();
+
+    // The child is waiting on an answer, not finished. Leave the pane open and hand
+    // the question up; `replyToSubagent` resumes this same session once answered.
+    if (sessionState.awaitingReply !== undefined) {
+      result.sessionId = sessionState.sessionId ?? result.sessionId;
+      result.awaitingReply = sessionState.awaitingReply;
+      result.output = sessionState.terminalAssistantText?.trim() || sessionState.awaitingReply;
+      result.exitCode = 0;
+      return result;
+    }
 
     if (sessionState.terminalError !== undefined) {
       result.sessionId = sessionState.sessionId ?? result.sessionId;

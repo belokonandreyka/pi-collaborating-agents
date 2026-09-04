@@ -112,6 +112,10 @@ export interface SubagentRunRecord {
   sessionFileUnavailableReason?: string;
   model?: string;
   launchMode: SubagentLaunchMode;
+  /** Pane the child is running in; the address a reply is typed into. */
+  paneRef?: string;
+  /** Question the child stopped on, while it is still waiting for an answer. */
+  awaitingReply?: string;
   startedAt: string;
   lastSeenAt: string;
   completedAt?: string;

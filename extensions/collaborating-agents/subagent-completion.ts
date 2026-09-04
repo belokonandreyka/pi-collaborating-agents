@@ -115,11 +115,32 @@ export function buildSubagentCompletionMessagePayload(
       ({ name, runId, reason }) => `- ${name}${runId ? ` (${runId})` : ""}: ${reason}`,
     );
 
+    // A parked child is not a completion. Withholding this would leave the parent
+    // reading a question out of a transcript and concluding the run had failed,
+    // which is exactly what makes it re-spawn instead of answering.
+    const awaiting = spawnResults
+      .map((spawnResult, index) => ({ spawnResult, runId: childRunIds[index] }))
+      .filter(({ spawnResult }) => Boolean(spawnResult.awaitingReply))
+      .map(({ spawnResult, runId }) => ({
+        runId,
+        name: formatAgentDisplayName(spawnResult.name),
+        question: spawnResult.awaitingReply!,
+      }));
+    const awaitingLines = awaiting.flatMap(({ name, runId, question }) => [
+      `- ${name}${runId ? ` (${runId})` : ""} asks: ${question}`,
+      ...(runId ? [`  agent_message({ action: "reply", runId: "${runId}", message: "..." })`] : []),
+    ]);
+
     return {
       customType: "collab_focus_status",
       content: [
-        result.isError ? "Subagent completion requires attention." : "Subagent completion ready.",
+        awaitingLines.length > 0
+          ? "A subagent is waiting on your answer; its session is still alive."
+          : result.isError
+            ? "Subagent completion requires attention."
+            : "Subagent completion ready.",
         childRunIds.length > 0 ? `${runLabel}: ${childRunIds.join(", ")}` : undefined,
+        ...(awaitingLines.length > 0 ? ["Awaiting a reply:", ...awaitingLines] : []),
         ...(failureLines.length > 0 ? ["Failure reason:", ...failureLines] : []),
         "Inspect the durable run record and transcript:",
         ...inspectionLines,
@@ -130,6 +151,7 @@ export function buildSubagentCompletionMessagePayload(
         childRunIds,
         failed: result.isError === true,
         ...(failureReasons.length > 0 ? { failureReasons } : {}),
+        ...(awaiting.length > 0 ? { awaiting } : {}),
       },
     };
   }
@@ -145,7 +167,7 @@ export function buildSubagentCompletionMessagePayload(
 
     const sections = spawnResults.map((r, index) => {
       const displayName = formatAgentDisplayName(r.name);
-      const status = r.exitCode === 0 ? "ok" : "failed";
+      const status = r.awaitingReply ? "awaiting reply" : r.exitCode === 0 ? "ok" : "failed";
       const output = (r.output || "(no output)").trim() || "(no output)";
       const runId = childRunIds[index];
       const cmuxNote = isPaneLaunchMode(r.launchMode)
@@ -161,6 +183,9 @@ export function buildSubagentCompletionMessagePayload(
         cmuxNote ? `- ${cmuxNote}` : undefined,
         "",
         output,
+        r.awaitingReply && runId
+          ? `Answer it instead of re-spawning:\n- agent_message({ action: "reply", runId: "${runId}", message: "..." })`
+          : undefined,
         ...inspectionHintLines(runId),
       ]
         .filter((line): line is string => Boolean(line))
@@ -173,9 +198,11 @@ export function buildSubagentCompletionMessagePayload(
     const singleResult = spawnResults[0];
     const runId = childRunIds[0];
     const runtimeLabel = singleResult?.name ? formatAgentDisplayName(singleResult.name) : "the subagent";
-    intro = result.isError
-      ? `Received an error from ${runtimeLabel}.`
-      : `Received final results from ${runtimeLabel}.`;
+    intro = singleResult?.awaitingReply
+      ? `${runtimeLabel} is waiting on your answer; its session is still alive.`
+      : result.isError
+        ? `Received an error from ${runtimeLabel}.`
+        : `Received final results from ${runtimeLabel}.`;
 
     const cmuxNote = singleResult && isPaneLaunchMode(singleResult.launchMode)
       ? singleResult.cmuxPaneClosed
@@ -188,6 +215,9 @@ export function buildSubagentCompletionMessagePayload(
     body = [
       cmuxNote ? `- ${cmuxNote}` : undefined,
       (singleResult?.output || result.content[0]?.text || "(no output)").trim() || "(no output)",
+      singleResult?.awaitingReply && runId
+        ? `Answer it instead of re-spawning:\n- agent_message({ action: "reply", runId: "${runId}", message: "..." })`
+        : undefined,
       ...inspectionHintLines(runId),
     ]
       .filter((line): line is string => Boolean(line))

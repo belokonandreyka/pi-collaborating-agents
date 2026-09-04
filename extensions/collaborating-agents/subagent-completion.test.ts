@@ -277,3 +277,45 @@ describe("subagent completion routing helpers", () => {
     expect(partitioned.deferred.map((entry) => entry.payload.content)).toEqual(["for-b"]);
   });
 });
+
+describe("a parked subagent in the completion payload", () => {
+  const parked = makeSpawnResult({
+    name: "SwiftTiger-1a2b-CalmMaple",
+    launchMode: "herdr-pane",
+    awaitingReply: "Which branch should I diff against?",
+  });
+
+  test("the hidden wake says it is waiting and gives the reply call", () => {
+    const payload = buildSubagentCompletionMessagePayload(
+      { content: [{ type: "text", text: "" }], details: { result: parked, childRunIds: ["run-7"] } },
+      { hiddenWake: true },
+    );
+
+    // A hidden wake withholds output on purpose, so without this the coordinator
+    // only hears "completion ready" and re-spawns rather than answering.
+    expect(payload.content).toContain("waiting on your answer");
+    expect(payload.content).toContain("Which branch should I diff against?");
+    expect(payload.content).toContain('agent_message({ action: "reply", runId: "run-7"');
+  });
+
+  test("the visible payload offers the reply instead of reporting a finished run", () => {
+    const payload = buildSubagentCompletionMessagePayload({
+      content: [{ type: "text", text: "" }],
+      details: { result: parked, childRunIds: ["run-7"] },
+    });
+
+    expect(payload.content).toContain("waiting on your answer");
+    expect(payload.content).not.toContain("Received final results");
+    expect(payload.content).toContain("Answer it instead of re-spawning");
+  });
+
+  test("an ordinary completion is untouched", () => {
+    const payload = buildSubagentCompletionMessagePayload({
+      content: [{ type: "text", text: "" }],
+      details: { result: makeSpawnResult(), childRunIds: ["run-8"] },
+    });
+
+    expect(payload.content).toContain("Received final results");
+    expect(payload.content).not.toContain("waiting on your answer");
+  });
+});

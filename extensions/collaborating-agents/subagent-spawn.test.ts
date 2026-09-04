@@ -808,6 +808,135 @@ describe("settled session result", () => {
   });
 });
 
+describe("a child parked on a question", () => {
+  function sessionLine(parts: {
+    role?: "assistant" | "user";
+    text?: string;
+    toolName?: string;
+    toolArgs?: unknown;
+    stopReason?: string;
+  }): string {
+    const content: unknown[] = [];
+    if (parts.toolName) {
+      content.push({ type: "toolCall", id: "t-1", name: parts.toolName, arguments: parts.toolArgs ?? {} });
+    }
+    if (parts.text !== undefined) content.push({ type: "text", text: parts.text });
+    return JSON.stringify({
+      type: "message",
+      id: `m-${Math.random().toString(36).slice(2, 8)}`,
+      message: {
+        role: parts.role ?? "assistant",
+        content,
+        ...(parts.stopReason ? { stopReason: parts.stopReason } : {}),
+      },
+    });
+  }
+
+  function writeSession(dir: string, lines: string[]): string {
+    const sessionFile = path.join(dir, "session.jsonl");
+    fs.writeFileSync(
+      sessionFile,
+      [JSON.stringify({ type: "session", id: "s-ask" }), ...lines].join("\n") + "\n",
+      "utf-8",
+    );
+    return sessionFile;
+  }
+
+  const askParent = sessionLine({
+    stopReason: "toolUse",
+    toolName: "agent_message",
+    toolArgs: { action: "send", to: "VividQuartz", message: "Which branch should I diff against?" },
+  });
+
+  async function settle(sessionFile: string, tempDir: string) {
+    return await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 30_000,
+      idleGraceMs: 100,
+      parentAgentName: "VividQuartz",
+    });
+  }
+
+  test("is reported as awaiting a reply instead of finished", async () => {
+    const tempDir = makeTempDir("collab-await-reply");
+    const sessionFile = writeSession(tempDir, [
+      askParent,
+      sessionLine({ text: "Asked the coordinator; waiting." }),
+    ]);
+
+    const result = await settle(sessionFile, tempDir);
+
+    // Going quiet after a question used to look exactly like finishing, so the
+    // coordinator harvested the question as the result and replaced the child.
+    expect(result.awaitingReply).toBe("Which branch should I diff against?");
+    expect(result.timedOut).toBe(false);
+  });
+
+  test("carrying on with more tool work is finishing, not waiting", async () => {
+    const tempDir = makeTempDir("collab-await-continued");
+    const sessionFile = writeSession(tempDir, [
+      askParent,
+      sessionLine({ stopReason: "toolUse", toolName: "bash", toolArgs: { command: "git diff" } }),
+      sessionLine({ text: "Done: three files changed." }),
+    ]);
+
+    const result = await settle(sessionFile, tempDir);
+
+    expect(result.awaitingReply).toBeUndefined();
+    expect(result.terminalAssistantText).toBe("Done: three files changed.");
+  });
+
+  test("an answer arriving in the session clears the question", async () => {
+    const tempDir = makeTempDir("collab-await-answered");
+    const sessionFile = writeSession(tempDir, [
+      askParent,
+      sessionLine({ role: "user", text: "Diff against test." }),
+      sessionLine({ text: "Done: three files changed." }),
+    ]);
+
+    const result = await settle(sessionFile, tempDir);
+
+    expect(result.awaitingReply).toBeUndefined();
+    expect(result.terminalAssistantText).toBe("Done: three files changed.");
+  });
+
+  test("a message to a sibling is collaboration, not a question for the coordinator", async () => {
+    const tempDir = makeTempDir("collab-await-sibling");
+    const sessionFile = writeSession(tempDir, [
+      sessionLine({
+        stopReason: "toolUse",
+        toolName: "agent_message",
+        toolArgs: { action: "send", to: "GoldenSun", message: "Taking the CO processors." },
+      }),
+      sessionLine({ text: "Done." }),
+    ]);
+
+    const result = await settle(sessionFile, tempDir);
+
+    expect(result.awaitingReply).toBeUndefined();
+    expect(result.terminalAssistantText).toBe("Done.");
+  });
+
+  test("an exited child is settled normally, because its session cannot be resumed", async () => {
+    const tempDir = makeTempDir("collab-await-exited");
+    const sessionFile = writeSession(tempDir, [askParent, sessionLine({ text: "Waiting." })]);
+    const exitMarkerPath = path.join(tempDir, "run.exit");
+    fs.writeFileSync(exitMarkerPath, "0\n", "utf-8");
+
+    const result = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath,
+      timeoutMs: 30_000,
+      idleGraceMs: 100,
+      parentAgentName: "VividQuartz",
+    });
+
+    expect(result.awaitingReply).toBeUndefined();
+    expect(result.exitCode).toBe(0);
+  });
+});
+
 describe("subagent spawn", () => {
   test("inherits parent profile directories in cmux panes without inventing them", () => {
     const inherited = collectCmuxInheritedEnv({

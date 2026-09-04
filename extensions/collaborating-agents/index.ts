@@ -50,6 +50,7 @@ import {
   createSpawnAgentDefinitionFromType,
   mapWithConcurrencyLimit,
   PROCESS_MODE_SESSION_FILE_UNAVAILABLE_REASON,
+  replyToSubagent,
   runSpawnTask,
   type SpawnAgentDefinition,
   type SpawnResult,
@@ -113,13 +114,14 @@ const AGENT_MESSAGE_ACTIONS = [
   "thread",
   "reserve",
   "release",
+  "reply",
 ] as const;
 
 const AGENT_MESSAGE_TAIL_MODES = ["full", "status"] as const;
 
 const AgentMessageParams = Type.Object({
   action: StringEnum(AGENT_MESSAGE_ACTIONS, {
-    description: "Action: status | list | sessions | session | tail | send | broadcast | feed | thread | reserve | release",
+    description: "Action: status | list | sessions | session | tail | send | broadcast | feed | thread | reserve | release | reply",
   }),
   to: Type.Optional(Type.String({ description: "Target agent name (send/thread) or subagent run selector (session/tail): display name, canonical name, recordId, batch id, session id prefix, or latest" })),
   runId: Type.Optional(Type.String({ description: "Subagent run selector for session/tail actions; preferred for child run id/recordId and takes precedence over to" })),
@@ -2004,6 +2006,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         sessionFileUnavailableReason: launch.sessionFile ? null : launch.sessionFileUnavailableReason ?? existing.sessionFileUnavailableReason,
         model: launch.resolvedModel ?? existing.model,
         launchMode: launch.launchMode,
+        paneRef: launch.cmuxPaneRef ?? launch.cmuxSurfaceRef ?? existing.paneRef,
         lastSeenAt: now,
         warnings: mergeWarnings(existing.warnings, launch.warnings),
       };
@@ -2067,17 +2070,24 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
       result.sessionFile = sessionFile ?? result.sessionFile;
       result.sessionFileUnavailableReason = sessionFile ? undefined : sessionFileUnavailableReason;
 
+      // A child parked on a question has not finished: its session and pane are
+      // still alive, so it stays "running" and keeps the question on the record
+      // until `agent_message({ action: "reply" })` answers it.
+      const awaiting = result.awaitingReply;
+
       return {
         name: existing.name ?? result.name,
         displayName: existing.displayName ?? formatAgentDisplayName(result.name),
-        status: result.exitCode === 0 ? "completed" : "failed",
+        status: awaiting ? "running" : result.exitCode === 0 ? "completed" : "failed",
         sessionId,
         sessionFile,
         sessionFileUnavailableReason: sessionFile ? null : sessionFileUnavailableReason,
         model: existing.model ?? result.resolvedModel ?? live?.model ?? registration?.model ?? previous?.model,
+        paneRef: existing.paneRef ?? result.cmuxPaneRef ?? result.cmuxSurfaceRef,
+        awaitingReply: awaiting ?? null,
         lastSeenAt: now,
-        completedAt: now,
-        exitCode: result.exitCode,
+        completedAt: awaiting ? undefined : now,
+        exitCode: awaiting ? undefined : result.exitCode,
         outputPreview: result.output,
         warnings: mergeWarnings(existing.warnings, result.warnings),
       };
@@ -2670,6 +2680,89 @@ Subagent run selectors for session/tail: child run id/recordId, display name, ca
         return {
           content: [{ type: "text", text: `Thread with ${peer} (${thread.length}):\n${lines.join("\n")}` }],
           details: { action, to: peer, requestedTo: params.to, events: thread },
+        };
+      }
+
+      if (action === "reply") {
+        const resolution = resolveSubagentRunRecord(dirs, params.runId ?? params.to, {
+          parentAgent: state.agentName,
+          parentSessionId: ctx.sessionManager.getSessionId(),
+          parentPid: process.pid,
+        });
+        if (resolution.status !== "ok") {
+          return {
+            content: [{ type: "text", text: resolution.message }],
+            isError: true,
+            details: { action, error: resolution.status },
+          };
+        }
+
+        const record = resolution.record;
+        const answer = params.message?.trim();
+        if (!answer) {
+          return {
+            content: [{ type: "text", text: "Missing 'message' for reply action." }],
+            isError: true,
+            details: { action, error: "missing_message" },
+          };
+        }
+        if (!record.awaitingReply) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `${record.displayName ?? record.name ?? record.recordId} is not waiting on a question. Use action "send" to message a running agent, or "subagent" to start a new one.`,
+              },
+            ],
+            isError: true,
+            details: { action, error: "not_awaiting" },
+          };
+        }
+        if (!record.sessionFile) {
+          return {
+            content: [{ type: "text", text: "No session file recorded for that subagent; it cannot be resumed." }],
+            isError: true,
+            details: { action, error: "no_session_file" },
+          };
+        }
+
+        const outcome = await replyToSubagent({
+          launchMode: record.launchMode,
+          paneRef: record.paneRef,
+          sessionFile: record.sessionFile,
+          message: answer,
+          parentAgentName: state.agentName,
+        });
+
+        if (!outcome.ok) {
+          return {
+            content: [{ type: "text", text: outcome.error }],
+            isError: true,
+            details: { action, error: "reply_failed" },
+          };
+        }
+
+        safeUpdateSubagentRunRecordWith(record.recordId, "reply", [], () => ({
+          awaitingReply: outcome.awaitingReply ?? null,
+          status: outcome.awaitingReply ? "running" : "completed",
+          completedAt: outcome.awaitingReply ? undefined : new Date().toISOString(),
+          outputPreview: outcome.output,
+          lastSeenAt: new Date().toISOString(),
+        }));
+
+        const label = record.displayName ?? record.name ?? record.recordId;
+        const text = outcome.awaitingReply
+          ? `${label} answered and asked again:\n\n${outcome.awaitingReply}`
+          : `${label} resumed and finished:\n\n${outcome.output ?? "(no output)"}`;
+
+        return {
+          content: [{ type: "text", text }],
+          details: {
+            action,
+            recordId: record.recordId,
+            awaitingReply: outcome.awaitingReply,
+            timedOut: outcome.timedOut,
+          },
         };
       }
 
