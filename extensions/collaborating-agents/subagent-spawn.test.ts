@@ -102,6 +102,10 @@ const argsFile = process.env.TEST_ARGS_FILE;
 if (argsFile) {
   fs.writeFileSync(argsFile, JSON.stringify(args), "utf-8");
 }
+const envFile = process.env.TEST_ENV_FILE;
+if (envFile) {
+  fs.writeFileSync(envFile, JSON.stringify({ PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR ?? null }), "utf-8");
+}
 
 const sessionIndex = args.indexOf("--session");
 const sessionPath = sessionIndex >= 0 ? args[sessionIndex + 1] : undefined;
@@ -731,6 +735,52 @@ describe("subagent spawn", () => {
 
     expect(result.launchSystemPromptSource).toBe("/tmp/scout.toml");
     expect(result.launchSystemPromptLength).toBe(typePrompt.length);
+  });
+
+  test("passes agentDir to the child as PI_CODING_AGENT_DIR and inherits the parent's when unset", async () => {
+    const tempDir = makeTempDir("collab-subagent-agent-dir");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const envFile = path.join(tempDir, "captured-env.json");
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_ENV_FILE = envFile;
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = "/tmp/pi-parent";
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "worker",
+      description: "Worker",
+      systemPrompt: "",
+      source: "bundled",
+      filePath: "/tmp/worker.toml",
+    };
+
+    try {
+      const withDir = await runSpawnTask(
+        tempDir,
+        { agent: "worker", task: "noop" },
+        agentDef,
+        { index: 0, runId: "agentdir1", recursionDepth: 0, agentDir: "/tmp/pi-sub" },
+      );
+      expect(withDir.exitCode).toBe(0);
+      expect(withDir.launchEnv.PI_CODING_AGENT_DIR).toBe("/tmp/pi-sub");
+      expect(JSON.parse(fs.readFileSync(envFile, "utf-8"))).toEqual({ PI_CODING_AGENT_DIR: "/tmp/pi-sub" });
+
+      const inherited = await runSpawnTask(
+        tempDir,
+        { agent: "worker", task: "noop" },
+        agentDef,
+        { index: 1, runId: "agentdir2", recursionDepth: 0 },
+      );
+      expect(inherited.exitCode).toBe(0);
+      expect(inherited.launchEnv.PI_CODING_AGENT_DIR).toBeUndefined();
+      expect(JSON.parse(fs.readFileSync(envFile, "utf-8"))).toEqual({ PI_CODING_AGENT_DIR: "/tmp/pi-parent" });
+    } finally {
+      delete process.env.TEST_ENV_FILE;
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    }
   });
 
   test("preserves requested extension tools in the child --tools allow-list", async () => {

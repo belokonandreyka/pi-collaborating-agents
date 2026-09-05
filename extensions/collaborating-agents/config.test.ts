@@ -152,3 +152,33 @@ describe("config loading", () => {
     expect(loadConfig(cwd)).toEqual(DEFAULT_CONFIG);
   });
 });
+
+describe("subagentAgentDir", () => {
+  function writeGlobalConfig(value: unknown): string {
+    const homeDir = makeTempDir("collab-config-agent-dir");
+    setHome(homeDir);
+    const agentDir = path.join(homeDir, ".pi", "agent");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "collaborating-agents.json"), JSON.stringify({ subagentAgentDir: value }), "utf-8");
+    return homeDir;
+  }
+
+  test("is unset by default", () => {
+    setHome(makeTempDir("collab-config-agent-dir"));
+    expect(loadConfig(process.cwd()).subagentAgentDir).toBeUndefined();
+  });
+
+  test("expands a leading ~ against HOME", () => {
+    const homeDir = writeGlobalConfig("~/.pi-sub/agent");
+    expect(loadConfig(process.cwd()).subagentAgentDir).toBe(path.join(homeDir, ".pi-sub", "agent"));
+  });
+
+  test("keeps absolute paths and ignores blank or non-string values", () => {
+    writeGlobalConfig("/opt/pi-sub");
+    expect(loadConfig(process.cwd()).subagentAgentDir).toBe("/opt/pi-sub");
+    writeGlobalConfig("   ");
+    expect(loadConfig(process.cwd()).subagentAgentDir).toBeUndefined();
+    writeGlobalConfig(42);
+    expect(loadConfig(process.cwd()).subagentAgentDir).toBeUndefined();
+  });
+});

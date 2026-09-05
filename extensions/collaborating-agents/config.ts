@@ -44,6 +44,15 @@ function resolveHomeDir(): string {
   return homedir();
 }
 
+function resolveAgentDirSetting(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed === "~") return resolveHomeDir();
+  if (trimmed.startsWith("~/")) return join(resolveHomeDir(), trimmed.slice(2));
+  return trimmed;
+}
+
 function readJson(path: string): Record<string, unknown> | null {
   if (!existsSync(path)) return null;
   try {
@@ -101,5 +110,6 @@ export function loadConfig(cwd: string): CollaboratingAgentsConfig {
     subagentLaunchDisplay: isSubagentLaunchDisplay(merged.subagentLaunchDisplay)
       ? merged.subagentLaunchDisplay
       : DEFAULT_CONFIG.subagentLaunchDisplay,
+    subagentAgentDir: resolveAgentDirSetting(merged.subagentAgentDir),
   };
 }

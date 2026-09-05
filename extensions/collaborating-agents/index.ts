@@ -134,6 +134,7 @@ const AgentMessageParams = Type.Object({
   ),
   limit: Type.Optional(Type.Number({ description: "Max messages, subagent runs, or tail entries to return; default 20" })),
   includeCompleted: Type.Optional(Type.Boolean({ description: "For sessions, include completed/failed subagent runs; defaults to true. Set false for active runs only" })),
+  verbose: Type.Optional(Type.Boolean({ description: "For sessions/session: return full task text, session details and output instead of trimmed previews (default false)." })),
   raw: Type.Optional(Type.Boolean({ description: "For tail, include structured parsed session entries in details" })),
   sinceOffset: Type.Optional(Type.Number({
     description: "For tail: byte offset returned by a previous call's nextOffset. Reads only new content since that offset (HTTP Range / Kafka-consumer semantics). Stale/out-of-range offsets transparently resync. Payload is always clamped to ~3 KB.",
@@ -171,6 +172,7 @@ interface AgentMessageSubagentRunParams {
   runId?: string;
   limit?: number;
   includeCompleted?: boolean;
+  verbose?: boolean;
   raw?: boolean;
   sinceOffset?: number;
   mode?: "full" | "status";
@@ -242,11 +244,21 @@ function formatRunCandidateList(candidates: SubagentRunListRecord[]): string {
     .join("\n");
 }
 
+const LIST_TASK_PREVIEW_CHARS = 90;
+const DETAIL_TASK_PREVIEW_CHARS = 400;
+const DETAIL_OUTPUT_PREVIEW_CHARS = 600;
+
+function trimPreview(text: string, max: number): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
 export function formatSubagentRunList(args: {
   records: SubagentRunListRecord[];
   total: number;
   limit: number;
   includeCompleted: boolean;
+  verbose?: boolean;
 }): string {
   if (args.total === 0) {
     return args.includeCompleted
@@ -256,6 +268,9 @@ export function formatSubagentRunList(args: {
 
   const lines = args.records.map((record) => {
     const stale = record.isStale ? " [stale]" : "";
+    if (!args.verbose) {
+      return `- ${record.recordId}: ${formatRunName(record)} | ${record.status}${stale} | ${record.type} | task "${trimPreview(record.taskPreview, LIST_TASK_PREVIEW_CHARS)}"`;
+    }
     const sessionFile = record.sessionFile
       ? "session file ready"
       : record.sessionFileUnavailableReason
@@ -275,12 +290,38 @@ export function formatSubagentRunList(args: {
   if (args.records.length < args.total) {
     lines.push(`${args.total - args.records.length} more not shown. Increase limit to inspect more runs.`);
   }
+  if (!args.verbose) {
+    lines.push("(compact view; pass verbose: true for batch, session id, session file and full task text)");
+  }
 
   return `Subagent sessions (${args.records.length} of ${args.total}):\n${lines.join("\n")}`;
 }
 
-export function formatSubagentRunDetail(record: SubagentRunListRecord): string {
+export function formatSubagentRunDetail(record: SubagentRunListRecord, verbose = false): string {
   const stale = record.isStale ? " [stale]" : "";
+  if (!verbose) {
+    const lines = [
+      `Subagent session ${record.recordId}`,
+      `Run ID: ${record.recordId}`,
+      `Name: ${formatRunName(record)}`,
+      `Status: ${record.status}${stale}`,
+      `Type: ${record.type}`,
+      `Session file: ${record.sessionFile ?? "(not available)"}`,
+      `Working directory: ${record.cwd}`,
+      `Started: ${record.startedAt}`,
+      `Last seen: ${record.lastSeenAt}`,
+      `Task: ${trimPreview(record.taskPreview, DETAIL_TASK_PREVIEW_CHARS)}`,
+    ];
+    if (record.completedAt) lines.push(`Completed: ${record.completedAt}`);
+    if (typeof record.exitCode === "number") lines.push(`Exit code: ${record.exitCode}`);
+    if (record.model) lines.push(`Model: ${record.model}`);
+    if (record.outputPreview) {
+      const full = record.outputPreview.length <= DETAIL_OUTPUT_PREVIEW_CHARS;
+      lines.push(`Output preview${full ? "" : ` (first ${DETAIL_OUTPUT_PREVIEW_CHARS} of ${record.outputPreview.length} chars; pass verbose: true for all)`}: ${full ? record.outputPreview : `${record.outputPreview.slice(0, DETAIL_OUTPUT_PREVIEW_CHARS)}…`}`);
+    }
+    if (record.warnings?.length) lines.push(`Warnings: ${record.warnings.join("; ")}`);
+    return lines.join("\n");
+  }
   const lines = [
     `Subagent session ${record.recordId}`,
     `Run ID: ${record.recordId}`,
@@ -356,7 +397,7 @@ export function handleAgentMessageSessions(
   const truncated = records.length < filtered.length;
 
   return {
-    content: [{ type: "text", text: formatSubagentRunList({ records, total: filtered.length, limit, includeCompleted }) }],
+    content: [{ type: "text", text: formatSubagentRunList({ records, total: filtered.length, limit, includeCompleted, verbose: params.verbose === true }) }],
     details: {
       action: "sessions",
       includeCompleted,
@@ -517,7 +558,7 @@ export function handleAgentMessageSession(
 
   const { record, sessionFileResolved } = refreshResolvedRunRecord(dirs, resolved.record, context);
   return {
-    content: [{ type: "text", text: formatSubagentRunDetail(record) }],
+    content: [{ type: "text", text: formatSubagentRunDetail(record, params.verbose === true) }],
     details: {
       action: "session",
       requestedSelector,
@@ -1594,6 +1635,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         recursionDepth: depthState.depth,
         parentAgentName: state.agentName,
         launchMode: config.subagentLaunchMode,
+        agentDir: config.subagentAgentDir,
         closeCompletedPane: config.closeCompletedPanes,
         closeFailedPane: config.closeFailedPanes,
         preserveOrchestratorPane: config.preserveOrchestratorPane,
@@ -1688,6 +1730,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         parentAgentName: state.agentName,
         launchDelayMs: launchStaggerMs * index,
         launchMode: config.subagentLaunchMode,
+        agentDir: config.subagentAgentDir,
         closeCompletedPane: config.closeCompletedPanes,
         closeFailedPane: config.closeFailedPanes,
         preserveOrchestratorPane: config.preserveOrchestratorPane,

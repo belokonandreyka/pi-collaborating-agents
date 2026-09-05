@@ -55,6 +55,7 @@ export interface SpawnResult {
   launchEnv: {
     PI_AGENT_NAME: string;
     PI_COLLAB_SUBAGENT_DEPTH: string;
+    PI_CODING_AGENT_DIR?: string;
   };
   launchDelayMs?: number;
   resolvedModel?: string;
@@ -1518,6 +1519,8 @@ export async function runSpawnTask(
     parentAgentName?: string;
     launchDelayMs?: number;
     launchMode?: SubagentLaunchMode;
+    /** Pi config directory for the child; overrides the inherited PI_CODING_AGENT_DIR. */
+    agentDir?: string;
     closeCompletedPane?: boolean;
     closeFailedPane?: boolean;
     preserveOrchestratorPane?: boolean;
@@ -1573,10 +1576,12 @@ export async function runSpawnTask(
   // Keep the task prompt payload user-controlled (type instructions come from TOML
   // via --append-system-prompt). Only add lightweight parent context metadata.
   const wrappedTaskPrompt = `${parentContextHeader}${task.task}`;
+  const childAgentDir = options.agentDir?.trim() || undefined;
   const env = {
     ...process.env,
     PI_AGENT_NAME: childName,
     PI_COLLAB_SUBAGENT_DEPTH: String(options.recursionDepth + 1),
+    ...(childAgentDir ? { PI_CODING_AGENT_DIR: childAgentDir } : {}),
   };
 
   const cwd = task.cwd || options.defaultCwd || runtimeCwd;
@@ -1622,6 +1627,7 @@ export async function runSpawnTask(
     launchEnv: {
       PI_AGENT_NAME: childName,
       PI_COLLAB_SUBAGENT_DEPTH: String(options.recursionDepth + 1),
+      ...(childAgentDir ? { PI_CODING_AGENT_DIR: childAgentDir } : {}),
     },
     launchDelayMs,
     resolvedModel: model,
@@ -1639,6 +1645,9 @@ export async function runSpawnTask(
       ...collectInheritedPaneEnv(),
       PI_AGENT_NAME: result.launchEnv.PI_AGENT_NAME,
       PI_COLLAB_SUBAGENT_DEPTH: result.launchEnv.PI_COLLAB_SUBAGENT_DEPTH,
+      ...(result.launchEnv.PI_CODING_AGENT_DIR
+        ? { PI_CODING_AGENT_DIR: result.launchEnv.PI_CODING_AGENT_DIR }
+        : {}),
     };
 
     const paneLaunchScript = createPaneLaunchScript({

@@ -460,6 +460,24 @@ A quiet auto-resume configuration is:
 
 The coordinator receives no launch or session-ready custom messages. Completion sends one minimal wake token; inspect its Run ID(s) through the durable session registry for the full result.
 
+#### Compact `sessions` / `session` output
+
+`agent_message({ action: "sessions" })` returns one line per run (run id, name, status, type, task preview trimmed to 90 characters). `agent_message({ action: "session", runId })` trims the task to 400 characters and the output preview to 600. Pass `verbose: true` to either action for the full record (batch id, session id and file, full task and output). The `details` payload is unaffected.
+
+#### `subagentAgentDir` (string, default: unset)
+
+Pi config directory for spawned subagents, passed to the child as `PI_CODING_AGENT_DIR` in both `process` and `herdr-pane` launch modes. A leading `~` expands to the home directory. When unset, children inherit the parent's directory (and therefore its packages, extensions, `AGENTS.md`, and skills).
+
+Use it to give subagents a slimmer profile than the orchestrator: a separate directory with only the packages a child needs (for example the LSP and search tools plus this extension), a short `AGENTS.md` without coordinator-only rules, and symlinks to the parent's `auth.json`, `models.json`, and `trust.json`. Combined with `tools` in the subagent TOML this cuts the per-child startup context substantially.
+
+```json
+{
+  "subagentAgentDir": "~/.pi-sub/agent"
+}
+```
+
+The extension's own state (`~/.pi/agent/collaborating-agents/`) is resolved from the home directory, not from `PI_CODING_AGENT_DIR`, so children in a separate profile still register in the same registry and message inbox as the parent.
+
 ### Environment variables
 
 #### `COLLABORATING_AGENTS_DIR`

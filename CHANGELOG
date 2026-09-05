@@ -2,5 +2,7 @@
 
 ## Unreleased
 
+- `sessions` and `session` now return compact text by default (one line per run, trimmed task/output previews); `verbose: true` restores the full record. Cuts the per-call context cost of coordinator polling.
+- Added `subagentAgentDir` config key: spawned subagents get their own Pi config directory via `PI_CODING_AGENT_DIR` (process and herdr-pane modes), so children can run a slimmer profile than the orchestrator.
 - Fixed subagent launch tool filtering so extension tools such as `agent_message` remain active in spawned agents.
 - Fixed Pi 0.65+ compatibility by relying on `session_start` for session replacement lifecycle events instead of the removed `session_switch` and `session_fork` hooks.

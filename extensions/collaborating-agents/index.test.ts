@@ -386,7 +386,18 @@ describe("agent_message subagent sessions", () => {
       lastSeenAt: "2026-01-05T00:00:00.000Z",
     }))).toBe(true);
 
-    const defaultSessions = handleAgentMessageSessions(dirs, { limit: 2 }, {
+    const compactSessions = handleAgentMessageSessions(dirs, { limit: 2 }, {
+      parentAgent: "Coordinator",
+      parentSessionId: "parent-session",
+      parentPid: 123,
+      now: "2026-01-04T00:00:05.000Z",
+      staleAfterMs: 1000,
+    });
+    expect(compactSessions.content[0]?.text).not.toContain("batch batch-stale");
+    expect(compactSessions.content[0]?.text).toContain("- run-stale: Worker Stale | running [stale] | worker | task \"Inspect the repository\"");
+    expect(compactSessions.content[0]?.text).toContain("verbose: true");
+
+    const defaultSessions = handleAgentMessageSessions(dirs, { limit: 2, verbose: true }, {
       parentAgent: "Coordinator",
       parentSessionId: "parent-session",
       parentPid: 123,

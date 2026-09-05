@@ -166,6 +166,8 @@ export interface CollaboratingAgentsConfig {
   subagentCompletionDisplay: SubagentCompletionDisplay;
   triggerTurnOnSubagentCompletion: boolean;
   subagentLaunchDisplay: SubagentLaunchDisplay;
+  /** Pi config directory (`PI_CODING_AGENT_DIR`) for spawned subagents. Unset = inherit the parent's. */
+  subagentAgentDir?: string;
 }
 
 export type AgentMessageAction =
