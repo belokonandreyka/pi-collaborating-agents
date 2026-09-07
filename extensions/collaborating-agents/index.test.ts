@@ -1377,6 +1377,66 @@ describe("subagent launch identity", () => {
     await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
   });
 
+  test("a second batch launches while the first is still running", async () => {
+    const tempDir = makeTempDir("collab-index-concurrent");
+    writeFakePiBinary(tempDir);
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.HOME = tempDir;
+    process.env.USERPROFILE = tempDir;
+    process.env.COLLABORATING_AGENTS_DIR = path.join(tempDir, "state");
+    process.env.TEST_PI_EXIT_DELAY_MS = "1500";
+
+    const harness = makeHarness();
+    collaboratingAgentsExtension(harness.pi);
+    const subagentTool = harness.tools.get("subagent");
+    if (!subagentTool) throw new Error("subagent tool was not registered");
+
+    const ctx = makeContext(tempDir);
+    try {
+      const first = await subagentTool.execute("tool-call-1", { task: "Independent review" }, undefined, undefined, ctx);
+      // The orchestrator used to be told "a run is already in progress" here and had
+      // to sit on the new instruction until the review finished.
+      const second = await subagentTool.execute("tool-call-2", { task: "Implement the follow-up" }, undefined, undefined, ctx);
+
+      expect(first.details).toMatchObject({ queued: true, background: true });
+      expect(second.details).toMatchObject({ queued: true, background: true });
+      expect((second.details as { batchRunId: string }).batchRunId).not.toBe((first.details as { batchRunId: string }).batchRunId);
+    } finally {
+      delete process.env.TEST_PI_EXIT_DELAY_MS;
+      await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
+    }
+  });
+
+  test("maxConcurrentSubagentBatches caps how many batches may run at once", async () => {
+    const tempDir = makeTempDir("collab-index-batch-cap");
+    writeFakePiBinary(tempDir);
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.HOME = tempDir;
+    process.env.USERPROFILE = tempDir;
+    process.env.COLLABORATING_AGENTS_DIR = path.join(tempDir, "state");
+    process.env.TEST_PI_EXIT_DELAY_MS = "1500";
+    fs.mkdirSync(path.join(tempDir, ".pi"), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, ".pi", "collaborating-agents.json"), JSON.stringify({ maxConcurrentSubagentBatches: 1 }), "utf-8");
+
+    const harness = makeHarness();
+    collaboratingAgentsExtension(harness.pi);
+    const subagentTool = harness.tools.get("subagent");
+    if (!subagentTool) throw new Error("subagent tool was not registered");
+
+    const ctx = makeContext(tempDir);
+    try {
+      const first = await subagentTool.execute("tool-call-1", { task: "Independent review" }, undefined, undefined, ctx);
+      const second = await subagentTool.execute("tool-call-2", { task: "Implement the follow-up" }, undefined, undefined, ctx);
+
+      expect(first.details).toMatchObject({ queued: true });
+      expect(second.details).toMatchObject({ queued: false, blocked: "already_running" });
+      expect(second.content[0]?.text).toContain("maxConcurrentSubagentBatches is 1");
+    } finally {
+      delete process.env.TEST_PI_EXIT_DELAY_MS;
+      await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
+    }
+  });
+
   test("subagent tool reports all child run ids for parallel launches", async () => {
     const tempDir = makeTempDir("collab-index-parallel");
     writeFakePiBinary(tempDir);

@@ -163,6 +163,8 @@ export interface CollaboratingAgentsConfig {
   preserveOrchestratorPane: boolean;
   /** Minimum gap between progress updates posted to the orchestrator, per child. 0 disables them. */
   subagentProgressIntervalMs: number;
+  /** How many subagent batches may run at once (a resumed reply counts as one). 0 removes the cap. */
+  maxConcurrentSubagentBatches: number;
   subagentCompletionDisplay: SubagentCompletionDisplay;
   triggerTurnOnSubagentCompletion: boolean;
   subagentLaunchDisplay: SubagentLaunchDisplay;

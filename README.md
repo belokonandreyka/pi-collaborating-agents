@@ -124,6 +124,7 @@ Actions:
 - `broadcast` – send to all active peers (`message`, optional `urgent`)
 - `feed` – recent global message log (`limit` optional)
 - `thread` – direct-message thread with one peer (`to`, `limit` optional)
+- `reply` – answer a subagent parked on a question (`runId` + `message`); returns as soon as the answer is delivered, and the resumed run's final output (or next question) is posted on completion like any background spawn
 - `reserve` – reserve files/directories for write/edit coordination (`paths`, optional `reason`)
 - `release` – release reservations (`paths` optional; omit to release all)
 
@@ -378,7 +379,7 @@ Use `"herdr-pane"` when you want every spawned agent to have a real visible term
 
 By default, successfully completed pane subagents are auto-closed after the orchestrator has collected their final output and the pane has stayed idle for a short grace period. If the pane reports a non-zero post-output exit during that grace period, or if close/idle detection fails, the pane is left open so you can inspect diagnostics.
 
-A subagent that ends its turn on a question for its coordinator is the exception: it is reported as awaiting a reply rather than finished, and its pane is deliberately left open so `agent_message({ action: "reply", runId, message })` can type the answer into the live session.
+A subagent that ends its turn on a question for its coordinator is the exception: it is reported as awaiting a reply rather than finished, and its pane is deliberately left open so `agent_message({ action: "reply", runId, message })` can type the answer into the live session. `reply` returns as soon as the answer is delivered; the resumed turn is collected in the background and posted on completion, exactly like a fresh spawn, and only text written after the answer counts as its result.
 
 Example:
 
@@ -421,6 +422,12 @@ Updates travel through the same delivery queue as completions, so they wait for 
 This setting affects the `"herdr-pane"` launch mode, the only mode that watches a child session file while it runs.
 
 Set it to `0` together with `subagentLaunchDisplay: "hidden"` when you want no launch, session-ready, or progress messages rendered.
+
+#### `maxConcurrentSubagentBatches` (number, default: `4`)
+
+How many subagent batches may be in flight at once. Each `subagent` call is one batch, whether it launches one child or several in parallel; a child resumed through `agent_message({ action: "reply" })` counts as one batch until it finishes. Set to `0` to remove the cap.
+
+Batches are independent: an orchestrator can keep a long review running and still spawn a worker for the next instruction. Each batch posts its own completion, and run records stay separate. The cap only exists so a looping orchestrator cannot fan out without bound; when it is hit the tool returns `blocked: "already_running"` with the current count instead of launching.
 
 #### `subagentLaunchDisplay` (`"full" | "compact" | "hidden"`, default: `"full"`)
 
@@ -476,15 +483,17 @@ Use it to give subagents a slimmer profile than the orchestrator: a separate dir
 }
 ```
 
-The extension's own state (`~/.pi/agent/collaborating-agents/`) is resolved from the home directory, not from `PI_CODING_AGENT_DIR`, so children in a separate profile still register in the same registry and message inbox as the parent.
+Children keep talking on the parent's collaboration bus: the spawn pins `COLLABORATING_AGENTS_DIR` to the parent's resolved state directory, so a child in a separate profile still registers in the same registry and message inbox as the parent, while a standalone session started in that other profile gets its own bus (see below).
 
 ### Environment variables
 
 #### `COLLABORATING_AGENTS_DIR`
 
-Overrides the storage root used by the extension. Default:
+Overrides the storage root used by the extension. Resolution order:
 
-- `~/.pi/agent/collaborating-agents`
+1. `COLLABORATING_AGENTS_DIR` (set explicitly, or pinned by the parent for spawned children)
+2. `$PI_CODING_AGENT_DIR/collaborating-agents` — a session started in another Pi profile gets its own bus, so two profiles on one machine do not receive each other's broadcasts
+3. `~/.pi/agent/collaborating-agents`
 
 This affects:
 

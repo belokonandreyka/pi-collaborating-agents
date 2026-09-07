@@ -56,6 +56,8 @@ export interface SpawnResult {
     PI_AGENT_NAME: string;
     PI_COLLAB_SUBAGENT_DEPTH: string;
     PI_CODING_AGENT_DIR?: string;
+    /** The parent's collaboration bus, pinned so a child in another profile still shares it. */
+    COLLABORATING_AGENTS_DIR: string;
   };
   launchDelayMs?: number;
   resolvedModel?: string;
@@ -1098,6 +1100,7 @@ function readSpawnSessionState(
   terminalError?: string;
   progress?: SubagentProgress;
   pendingQuestion?: string;
+  userMessageCount?: number;
 } {
   if (!fs.existsSync(sessionFile)) return {};
 
@@ -1114,6 +1117,7 @@ function readSpawnSessionState(
   let toolCount = 0;
   let lastTool: string | undefined;
   let pendingQuestion: string | undefined;
+  let userMessageCount = 0;
 
   for (const line of content.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -1129,14 +1133,30 @@ function readSpawnSessionState(
     if (parsed.parentQuestion) pendingQuestion = parsed.parentQuestion;
     // The task prompt itself is a user message, so this also clears a question the
     // child somehow asked before reading its task.
-    if (parsed.userMessage) pendingQuestion = undefined;
+    if (parsed.userMessage) {
+      pendingQuestion = undefined;
+      userMessageCount += 1;
+      // A user message opens a new turn, so whatever the child said last is no
+      // longer its final word. Without this, a coordinator's reply landing after a
+      // "blocked" report was settled instantly on that stale report while the
+      // child was still working on the answer.
+      terminalAssistantText = undefined;
+      terminalError = undefined;
+    }
     if (parsed.terminalAssistantMessage) {
       terminalAssistantText = parsed.terminalAssistantText;
       terminalError = parsed.terminalError;
     }
   }
 
-  return { sessionId, terminalAssistantText, terminalError, pendingQuestion, progress: { toolCount, lastTool } };
+  return {
+    sessionId,
+    terminalAssistantText,
+    terminalError,
+    pendingQuestion,
+    userMessageCount,
+    progress: { toolCount, lastTool },
+  };
 }
 
 // A pane subagent session can emit multiple assistant messages before it is
@@ -1152,6 +1172,13 @@ export async function waitForSettledSessionResult(args: {
   idleGraceMs?: number;
   errorSettleMs?: number;
   parentAgentName?: string;
+  /**
+   * Ignore any final assistant text recorded before the session holds at least this
+   * many user messages. A reply typed into a live pane appears in the transcript
+   * only once the child starts its next turn, so until then the file still ends on
+   * the answer it gave before the question.
+   */
+  minUserMessages?: number;
   onUpdate?: (state: { sessionId?: string; progress?: SubagentProgress }) => void;
 }): Promise<{
   sessionId?: string;
@@ -1193,7 +1220,8 @@ export async function waitForSettledSessionResult(args: {
 
     if (lastParsedToken === null || didFileChange(currentToken, lastParsedToken)) {
       const state = readSpawnSessionState(args.sessionFile, args.parentAgentName);
-      pendingQuestion = state.pendingQuestion;
+      const turnStarted = (state.userMessageCount ?? 0) >= (args.minUserMessages ?? 0);
+      pendingQuestion = turnStarted ? state.pendingQuestion : undefined;
       if (state.sessionId) {
         sessionId = state.sessionId;
         args.onUpdate?.({ sessionId });
@@ -1202,10 +1230,10 @@ export async function waitForSettledSessionResult(args: {
         lastReportedToolCount = state.progress.toolCount;
         args.onUpdate?.({ sessionId, progress: state.progress });
       }
-      if (state.terminalAssistantText !== undefined || state.terminalError !== undefined) {
-        terminalAssistantText = state.terminalAssistantText;
-        terminalError = state.terminalError;
-      }
+      // The whole file is re-read each time, so its verdict is authoritative: a new
+      // turn clears the previous final text instead of leaving it sticky here.
+      terminalAssistantText = turnStarted ? state.terminalAssistantText : undefined;
+      terminalError = turnStarted ? state.terminalError : undefined;
       if (currentToken) {
         lastParsedToken = currentToken;
       }
@@ -1443,14 +1471,19 @@ async function readSubagentPaneScreen(
   return paneRef ? await herdrReadPane(paneRef, lines) : "";
 }
 
-/**
- * Answer a child that stopped on a question and keep waiting for its real result.
- *
- * The answer is typed into the child's live pane, which the TUI reads as ordinary
- * user input and turns into a new turn — so the child keeps everything it had
- * already worked out instead of being replaced by a fresh spawn.
- */
-export async function replyToSubagent(args: {
+export type ReplyOutcome =
+  | {
+      ok: true;
+      output?: string;
+      awaitingReply?: string;
+      sessionId?: string;
+      timedOut: boolean;
+      paneClosed?: boolean;
+      paneCloseError?: string;
+    }
+  | { ok: false; error: string };
+
+export interface ReplyToSubagentArgs {
   launchMode: SubagentLaunchMode;
   paneRef?: string;
   surfaceRef?: string;
@@ -1458,11 +1491,24 @@ export async function replyToSubagent(args: {
   message: string;
   timeoutMs?: number;
   parentAgentName?: string;
+  /** Close the child's pane once the resumed turn ends on a real result. */
+  closePaneOnFinish?: boolean;
   onProgress?: (progress: SubagentProgress) => void;
-}): Promise<
-  | { ok: true; output?: string; awaitingReply?: string; sessionId?: string; timedOut: boolean }
-  | { ok: false; error: string }
-> {
+}
+
+/**
+ * Type an answer into a child that stopped on a question, and hand back the wait
+ * for what it does next as a promise.
+ *
+ * The answer goes into the child's live pane, which the TUI reads as ordinary user
+ * input and turns into a new turn — so the child keeps everything it had already
+ * worked out instead of being replaced by a fresh spawn. Delivery is confirmed
+ * before this returns; the resumed turn can take as long as the original run, so
+ * the caller decides whether to block on `outcome` or collect it in the background.
+ */
+export async function startReplyToSubagent(
+  args: ReplyToSubagentArgs,
+): Promise<{ ok: true; outcome: Promise<ReplyOutcome> } | { ok: false; error: string }> {
   const answer = args.message.replace(/\s*\n\s*/g, " ").trim();
   if (!answer) return { ok: false, error: "Reply message is empty." };
 
@@ -1483,28 +1529,58 @@ export async function replyToSubagent(args: {
     return { ok: false, error: "The subagent has already exited; its session cannot be resumed." };
   }
 
+  // Everything in the transcript so far belongs to the turn that ended on the
+  // question. The result of this reply is whatever the child says after one more
+  // user message (the answer) has been recorded.
+  const before = readSpawnSessionState(args.sessionFile, args.parentAgentName);
+  const minUserMessages = (before.userMessageCount ?? 0) + 1;
+
   const delivered = await herdrSendLine(paneRef, answer);
   if (!delivered.ok) return { ok: false, error: `Could not deliver the reply: ${delivered.error}` };
 
-  const settled = await waitForSettledSessionResult({
-    sessionFile: args.sessionFile,
-    exitMarkerPath,
-    timeoutMs: args.timeoutMs ?? PANE_RESULT_TIMEOUT_MS,
-    parentAgentName: args.parentAgentName,
-    onUpdate: (state) => {
-      if (state.progress) args.onProgress?.(state.progress);
-    },
-  });
+  const outcome = (async (): Promise<ReplyOutcome> => {
+    const settled = await waitForSettledSessionResult({
+      sessionFile: args.sessionFile,
+      exitMarkerPath,
+      timeoutMs: args.timeoutMs ?? PANE_RESULT_TIMEOUT_MS,
+      parentAgentName: args.parentAgentName,
+      minUserMessages,
+      onUpdate: (state) => {
+        if (state.progress) args.onProgress?.(state.progress);
+      },
+    });
 
-  if (settled.terminalError !== undefined) return { ok: false, error: settled.terminalError };
+    if (settled.terminalError !== undefined) return { ok: false, error: settled.terminalError };
 
-  return {
-    ok: true,
-    output: settled.terminalAssistantText,
-    awaitingReply: settled.awaitingReply,
-    sessionId: settled.sessionId,
-    timedOut: settled.timedOut,
-  };
+    const result: ReplyOutcome = {
+      ok: true,
+      output: settled.terminalAssistantText,
+      awaitingReply: settled.awaitingReply,
+      sessionId: settled.sessionId,
+      timedOut: settled.timedOut,
+    };
+
+    // Same rule as a fresh spawn: a finished child's pane is released, a parked or
+    // timed-out one stays open for inspection and for the next answer.
+    if (args.closePaneOnFinish && settled.awaitingReply === undefined && !settled.timedOut && settled.terminalAssistantText !== undefined) {
+      const closed = await closeSubagentPane({ paneRef: args.paneRef, surfaceRef: paneRef });
+      if (closed.ok) result.paneClosed = true;
+      else result.paneCloseError = closed.error;
+    }
+    return result;
+  })();
+
+  return { ok: true, outcome };
+}
+
+/**
+ * Answer a child that stopped on a question and wait for its real result.
+ * Convenience wrapper over `startReplyToSubagent` for callers that can block.
+ */
+export async function replyToSubagent(args: ReplyToSubagentArgs): Promise<ReplyOutcome> {
+  const started = await startReplyToSubagent(args);
+  if (!started.ok) return started;
+  return await started.outcome;
 }
 
 export async function runSpawnTask(
@@ -1577,10 +1653,14 @@ export async function runSpawnTask(
   // via --append-system-prompt). Only add lightweight parent context metadata.
   const wrappedTaskPrompt = `${parentContextHeader}${task.task}`;
   const childAgentDir = options.agentDir?.trim() || undefined;
+  // The child must talk on the parent's bus even when it runs in a different Pi
+  // profile, where the default would resolve to that profile's own directory.
+  const collabDir = resolveDirs().base;
   const env = {
     ...process.env,
     PI_AGENT_NAME: childName,
     PI_COLLAB_SUBAGENT_DEPTH: String(options.recursionDepth + 1),
+    COLLABORATING_AGENTS_DIR: collabDir,
     ...(childAgentDir ? { PI_CODING_AGENT_DIR: childAgentDir } : {}),
   };
 
@@ -1627,6 +1707,7 @@ export async function runSpawnTask(
     launchEnv: {
       PI_AGENT_NAME: childName,
       PI_COLLAB_SUBAGENT_DEPTH: String(options.recursionDepth + 1),
+      COLLABORATING_AGENTS_DIR: collabDir,
       ...(childAgentDir ? { PI_CODING_AGENT_DIR: childAgentDir } : {}),
     },
     launchDelayMs,

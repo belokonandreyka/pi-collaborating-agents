@@ -10,6 +10,7 @@ import {
   resetPaneLayoutStateForTests,
   resolveSpawnAgentDefinition,
   replyToSubagent,
+  startReplyToSubagent,
   runSpawnTask,
   waitForSettledSessionResult,
 } from "./subagent-spawn.ts";
@@ -104,7 +105,7 @@ if (argsFile) {
 }
 const envFile = process.env.TEST_ENV_FILE;
 if (envFile) {
-  fs.writeFileSync(envFile, JSON.stringify({ PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR ?? null }), "utf-8");
+  fs.writeFileSync(envFile, JSON.stringify({ PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR ?? null, COLLABORATING_AGENTS_DIR: process.env.COLLABORATING_AGENTS_DIR ?? null }), "utf-8");
 }
 
 const sessionIndex = args.indexOf("--session");
@@ -626,6 +627,53 @@ describe("a child parked on a question", () => {
     expect(result.terminalAssistantText).toBe("Done: three files changed.");
   });
 
+  test("an answer arriving in the session supersedes the write-up that preceded it", async () => {
+    const tempDir = makeTempDir("collab-await-superseded");
+    // Asked, wrote a "blocked" report, then the coordinator's answer landed: that
+    // report is no longer the child's final word, and nothing is final until the
+    // resumed turn ends.
+    const sessionFile = writeSession(tempDir, [
+      askParent,
+      sessionLine({ text: "Blocked before measuring anything. Report follows." }),
+      sessionLine({ role: "user", text: "Diff against test." }),
+    ]);
+    setTimeout(() => {
+      fs.appendFileSync(sessionFile, sessionLine({ text: "Done: three files changed." }) + "\n", "utf-8");
+    }, 500);
+
+    const result = await settle(sessionFile, tempDir);
+
+    expect(result.awaitingReply).toBeUndefined();
+    expect(result.terminalAssistantText).toBe("Done: three files changed.");
+  });
+
+  test("a final text older than the required user message is not a result yet", async () => {
+    const tempDir = makeTempDir("collab-await-min-user");
+    const sessionFile = writeSession(tempDir, [
+      askParent,
+      sessionLine({ text: "Blocked before measuring anything. Report follows." }),
+    ]);
+    setTimeout(() => {
+      fs.appendFileSync(
+        sessionFile,
+        [sessionLine({ role: "user", text: "Diff against test." }), sessionLine({ text: "Done." })].join("\n") + "\n",
+        "utf-8",
+      );
+    }, 500);
+
+    const result = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 30_000,
+      idleGraceMs: 100,
+      parentAgentName: "VividQuartz",
+      minUserMessages: 1,
+    });
+
+    expect(result.awaitingReply).toBeUndefined();
+    expect(result.terminalAssistantText).toBe("Done.");
+  });
+
   test("a message to a sibling is collaboration, not a question for the coordinator", async () => {
     const tempDir = makeTempDir("collab-await-sibling");
     const sessionFile = writeSession(tempDir, [
@@ -765,7 +813,10 @@ describe("subagent spawn", () => {
       );
       expect(withDir.exitCode).toBe(0);
       expect(withDir.launchEnv.PI_CODING_AGENT_DIR).toBe("/tmp/pi-sub");
-      expect(JSON.parse(fs.readFileSync(envFile, "utf-8"))).toEqual({ PI_CODING_AGENT_DIR: "/tmp/pi-sub" });
+      expect(JSON.parse(fs.readFileSync(envFile, "utf-8"))).toEqual({
+        PI_CODING_AGENT_DIR: "/tmp/pi-sub",
+        COLLABORATING_AGENTS_DIR: path.join("/tmp/pi-parent", "collaborating-agents"),
+      });
 
       const inherited = await runSpawnTask(
         tempDir,
@@ -775,7 +826,12 @@ describe("subagent spawn", () => {
       );
       expect(inherited.exitCode).toBe(0);
       expect(inherited.launchEnv.PI_CODING_AGENT_DIR).toBeUndefined();
-      expect(JSON.parse(fs.readFileSync(envFile, "utf-8"))).toEqual({ PI_CODING_AGENT_DIR: "/tmp/pi-parent" });
+      // The child stays on the parent's bus even though its default would now be its own profile's.
+      expect(JSON.parse(fs.readFileSync(envFile, "utf-8"))).toEqual({
+        PI_CODING_AGENT_DIR: "/tmp/pi-parent",
+        COLLABORATING_AGENTS_DIR: inherited.launchEnv.COLLABORATING_AGENTS_DIR,
+      });
+      expect(inherited.launchEnv.COLLABORATING_AGENTS_DIR).toBe(path.join("/tmp/pi-parent", "collaborating-agents"));
     } finally {
       delete process.env.TEST_ENV_FILE;
       if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -2430,38 +2486,56 @@ describe("answering a parked subagent", () => {
     process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
     process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
 
-    // The transcript already carries the answer and the child's follow-up, so the
-    // wait settles on the resumed turn rather than on the question.
+    // The transcript ends on the turn that asked the question: the task prompt, the
+    // question, and a "blocked" write-up. That write-up is the last assistant text
+    // on disk when the reply is typed in, and it used to be harvested as the result
+    // of the reply before the child had even started its next turn.
+    const line = (id: string, message: Record<string, unknown>) => JSON.stringify({ type: "message", id, message });
     const sessionFile = path.join(tempDir, "session.jsonl");
     fs.writeFileSync(
       sessionFile,
       [
         JSON.stringify({ type: "session", id: "s-reply" }),
-        JSON.stringify({
-          type: "message",
-          id: "m-1",
-          message: {
-            role: "assistant",
-            stopReason: "toolUse",
-            content: [
-              {
-                type: "toolCall",
-                id: "t-1",
-                name: "agent_message",
-                arguments: { action: "send", to: "VividQuartz", message: "Which branch?" },
-              },
-            ],
-          },
+        line("m-0", { role: "user", content: [{ type: "text", text: "Diff the branch." }] }),
+        line("m-1", {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [
+            {
+              type: "toolCall",
+              id: "t-1",
+              name: "agent_message",
+              arguments: { action: "send", to: "VividQuartz", message: "Which branch?" },
+            },
+          ],
         }),
-        JSON.stringify({ type: "message", id: "m-2", message: { role: "user", content: [{ type: "text", text: "test" }] } }),
-        JSON.stringify({
-          type: "message",
-          id: "m-3",
-          message: { role: "assistant", content: [{ type: "text", text: "Diffed against test: 3 files." }] },
-        }),
+        line("m-2", { role: "assistant", content: [{ type: "text", text: "Blocked: no branch named. Report follows." }] }),
       ].join("\n") + "\n",
       "utf-8",
     );
+
+    // The pane records the answer and the resumed turn a little after delivery.
+    setTimeout(() => {
+      fs.appendFileSync(
+        sessionFile,
+        [
+          line("m-3", { role: "user", content: [{ type: "text", text: "Diff against test." }] }),
+          line("m-4", {
+            role: "assistant",
+            stopReason: "toolUse",
+            content: [{ type: "toolCall", id: "t-2", name: "bash", arguments: { command: "git diff test" } }],
+          }),
+        ].join("\n") + "\n",
+        "utf-8",
+      );
+    }, 400);
+    setTimeout(() => {
+      fs.appendFileSync(
+        sessionFile,
+        line("m-5", { role: "assistant", content: [{ type: "text", text: "Diffed against test: 3 files." }] }) + "\n",
+        "utf-8",
+      );
+    }, 900);
 
     const outcome = await replyToSubagent({
       launchMode: "herdr-pane",
@@ -2486,6 +2560,68 @@ describe("answering a parked subagent", () => {
     // send-text alone leaves the line sitting unsubmitted in the pane.
     expect(captured).toContainEqual(["pane", "send-text", "w1:p2", "Diff against test."]);
     expect(captured).toContainEqual(["pane", "send-keys", "w1:p2", "Enter"]);
+  });
+
+  test("startReplyToSubagent confirms delivery first and settles the resumed turn later", async () => {
+    const tempDir = makeTempDir("collab-reply-background");
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+
+    const line = (id: string, message: Record<string, unknown>) => JSON.stringify({ type: "message", id, message });
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    fs.writeFileSync(
+      sessionFile,
+      [
+        JSON.stringify({ type: "session", id: "s-bg" }),
+        line("m-0", { role: "user", content: [{ type: "text", text: "Diff the branch." }] }),
+        line("m-1", {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [
+            { type: "toolCall", id: "t-1", name: "agent_message", arguments: { action: "send", to: "VividQuartz", message: "Which branch?" } },
+          ],
+        }),
+        line("m-2", { role: "assistant", content: [{ type: "text", text: "Blocked. Report follows." }] }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const startedAt = Date.now();
+    const started = await startReplyToSubagent({
+      launchMode: "herdr-pane",
+      paneRef: "w1:p2",
+      sessionFile,
+      message: "Diff against test.",
+      parentAgentName: "VividQuartz",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    // Delivery is acknowledged without waiting for the child to do anything.
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+
+    let settledEarly = false;
+    void started.outcome.then(() => {
+      settledEarly = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settledEarly).toBe(false);
+
+    fs.appendFileSync(
+      sessionFile,
+      [
+        line("m-3", { role: "user", content: [{ type: "text", text: "Diff against test." }] }),
+        line("m-4", { role: "assistant", content: [{ type: "text", text: "Diffed against test: 3 files." }] }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const outcome = await started.outcome;
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.output).toBe("Diffed against test: 3 files.");
+      expect(outcome.awaitingReply).toBeUndefined();
+    }
   });
 
   test("refuses to report a delivery when the child has already exited", async () => {

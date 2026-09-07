@@ -27,6 +27,7 @@ import {
   sendDirect,
   unregisterSelf,
   updateSelfHeartbeat,
+  updateSubagentRunRecord,
   updateSubagentRunRecordWith,
   writeSubagentRunRecord,
 } from "./store.js";
@@ -50,8 +51,8 @@ import {
   createSpawnAgentDefinitionFromType,
   mapWithConcurrencyLimit,
   PROCESS_MODE_SESSION_FILE_UNAVAILABLE_REASON,
-  replyToSubagent,
   runSpawnTask,
+  startReplyToSubagent,
   type SpawnAgentDefinition,
   type SpawnResult,
   type SpawnSessionMetadata,
@@ -2330,8 +2331,13 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     updateStatus(ctx);
   }
 
+  function subagentBatchLimitReached(): boolean {
+    const max = config.maxConcurrentSubagentBatches;
+    return max > 0 && state.activeSubagentRuns >= max;
+  }
+
   function subagentRunInProgressMessage(): string {
-    return "A subagent run is already in progress. Do not wait for direct subagent messages; final outputs are auto-collected and posted when the run completes.";
+    return `Subagent batch limit reached: ${state.activeSubagentRuns} active, maxConcurrentSubagentBatches is ${config.maxConcurrentSubagentBatches}. Wait for a completion (final outputs are auto-collected and posted), or raise the limit in collaborating-agents.json.`;
   }
 
   function createSubagentBatchRunId(): string {
@@ -2418,9 +2424,13 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     const childRunIds = createChildRunIds(batchRunId, getSubagentTaskItems(params).length);
     const launchSessionFile = ctx.sessionManager.getSessionFile() ?? coordinatorSessionFile ?? localSessionFile;
 
+    // A fresh wave starts with a clean slate; a batch joining batches that are
+    // still running must not wipe what the coordinator already knows about them.
+    if (state.activeSubagentRuns === 0) {
+      state.completedSubagents = [];
+      state.unreadCounts.clear();
+    }
     state.activeSubagentRuns += 1;
-    state.completedSubagents = [];
-    state.unreadCounts.clear();
     updateStatus(ctx);
 
     void (async () => {
@@ -2769,43 +2779,125 @@ Subagent run selectors for session/tail: child run id/recordId, display name, ca
           };
         }
 
-        const outcome = await replyToSubagent({
+        const started = await startReplyToSubagent({
           launchMode: record.launchMode,
           paneRef: record.paneRef,
           sessionFile: record.sessionFile,
           message: answer,
           parentAgentName: state.agentName,
+          closePaneOnFinish: config.closeCompletedPanes,
+          onProgress: createSubagentProgressReporter(
+            () => record.displayName ?? record.name ?? record.recordId,
+            config.subagentProgressIntervalMs,
+            ctx,
+          ),
         });
 
-        if (!outcome.ok) {
+        if (!started.ok) {
           return {
-            content: [{ type: "text", text: outcome.error }],
+            content: [{ type: "text", text: started.error }],
             isError: true,
             details: { action, error: "reply_failed" },
           };
         }
 
+        const label = record.displayName ?? record.name ?? record.recordId;
+        const deliveredAt = new Date().toISOString();
         safeUpdateSubagentRunRecordWith(record.recordId, "reply", [], () => ({
-          awaitingReply: outcome.awaitingReply ?? null,
-          status: outcome.awaitingReply ? "running" : "completed",
-          completedAt: outcome.awaitingReply ? undefined : new Date().toISOString(),
-          outputPreview: outcome.output,
-          lastSeenAt: new Date().toISOString(),
+          awaitingReply: null,
+          status: "running",
+          completedAt: undefined,
+          exitCode: undefined,
+          lastSeenAt: deliveredAt,
         }));
 
-        const label = record.displayName ?? record.name ?? record.recordId;
-        const text = outcome.awaitingReply
-          ? `${label} answered and asked again:\n\n${outcome.awaitingReply}`
-          : `${label} resumed and finished:\n\n${outcome.output ?? "(no output)"}`;
+        // The resumed turn is collected exactly like a fresh background spawn: the
+        // coordinator gets its tool result back now and the child's next report (or
+        // next question) lands through the completion queue when it is ready.
+        const launchSessionFile = ctx.sessionManager.getSessionFile() ?? coordinatorSessionFile ?? localSessionFile;
+        state.activeSubagentRuns += 1;
+        updateStatus(ctx);
+        void (async () => {
+          try {
+            const outcome = await started.outcome;
+            const spawnResult: SpawnResult = {
+              agent: record.type,
+              name: record.name ?? record.recordId,
+              task: record.taskPreview,
+              exitCode: outcome.ok ? 0 : 1,
+              output: outcome.ok
+                ? (outcome.awaitingReply ? outcome.output?.trim() || outcome.awaitingReply : outcome.output?.trim() || "(no output)")
+                : outcome.error,
+              error: outcome.ok ? undefined : outcome.error,
+              launchMode: record.launchMode,
+              workingDirectory: record.cwd,
+              launchArgs: [],
+              launchCommand: "",
+              launchPrompt: "",
+              launchEnv: { PI_AGENT_NAME: record.name ?? record.recordId, PI_COLLAB_SUBAGENT_DEPTH: "1", COLLABORATING_AGENTS_DIR: dirs.base },
+              paneRef: record.paneRef,
+              surfaceRef: record.paneRef,
+              sessionId: (outcome.ok ? outcome.sessionId : undefined) ?? record.sessionId,
+              sessionFile: record.sessionFile,
+              resolvedModel: record.model,
+              coordinator: state.agentName,
+              awaitingReply: outcome.ok ? outcome.awaitingReply : undefined,
+              paneClosed: outcome.ok ? outcome.paneClosed : undefined,
+              paneCloseError: outcome.ok ? outcome.paneCloseError : undefined,
+            };
+            if (outcome.ok && outcome.timedOut && outcome.awaitingReply === undefined && !outcome.output) {
+              spawnResult.exitCode = 1;
+              spawnResult.error = "Timed out waiting for the resumed subagent turn to settle";
+              spawnResult.output = spawnResult.error;
+            }
+
+            markSubagentRunCompleted(record.recordId, spawnResult, []);
+            snapshotCompletedSubagents([spawnResult]);
+            updateStatus(ctx);
+
+            const failed = spawnResult.exitCode !== 0;
+            const text = spawnResult.awaitingReply
+              ? `${label} answered and asked again:\n\n${spawnResult.awaitingReply}`
+              : failed
+                ? `${label} failed after resuming:\n\n${spawnResult.output}`
+                : `${label} resumed and finished:\n\n${spawnResult.output}`;
+            sendSubagentCompletionUpdate(
+              {
+                content: [{ type: "text", text }],
+                details: { mode: "subagent", resumed: true, result: spawnResult, childRunIds: [record.recordId] },
+                isError: failed,
+              },
+              ctx,
+              { targetSessionFile: launchSessionFile },
+            );
+            if (ctx.hasUI) ctx.ui.notify(failed ? "Subagent failed" : "Subagent completed", failed ? "error" : "info");
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            const now = new Date().toISOString();
+            try {
+              updateSubagentRunRecord(dirs, record.recordId, { status: "failed", lastSeenAt: now, completedAt: now, outputPreview: msg });
+            } catch {
+              // Failure notification remains available even if durable storage is unavailable.
+            }
+            sendSubagentFailureUpdate(msg, [record.recordId], ctx, { targetSessionFile: launchSessionFile });
+          } finally {
+            state.activeSubagentRuns = Math.max(0, state.activeSubagentRuns - 1);
+            updateStatus(ctx);
+          }
+        })();
 
         return {
-          content: [{ type: "text", text }],
-          details: {
-            action,
-            recordId: record.recordId,
-            awaitingReply: outcome.awaitingReply,
-            timedOut: outcome.timedOut,
-          },
+          content: [
+            {
+              type: "text",
+              text: [
+                `${label} answered; run ${record.recordId} resumed in background.`,
+                "Do not wait for direct subagent messages; its final output (or next question) is auto-collected and posted on completion.",
+                `Inspect progress: agent_message({ action: "tail", runId: "${record.recordId}" })`,
+              ].join("\n"),
+            },
+          ],
+          details: { action, recordId: record.recordId, resumed: true, background: true },
         };
       }
 
@@ -2931,7 +3023,7 @@ By default subagents use the same model as the spawning session.` ,
         };
       }
 
-      if (state.activeSubagentRuns > 0) {
+      if (subagentBatchLimitReached()) {
         const text = subagentRunInProgressMessage();
         if (ctx.hasUI) ctx.ui.notify("Subagent run already in progress", "warning");
         return {
@@ -3021,7 +3113,7 @@ By default subagents use the same model as the spawning session.` ,
         return;
       }
 
-      if (state.activeSubagentRuns > 0) {
+      if (subagentBatchLimitReached()) {
         ctx.ui.notify("Subagent run already in progress", "warning");
         return;
       }

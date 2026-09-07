@@ -17,6 +17,9 @@ const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
   closeFailedPanes: false,
   preserveOrchestratorPane: false,
   subagentProgressIntervalMs: 30_000,
+  // Enough for an independent review plus a couple of workers; a cap still exists so
+  // a looping orchestrator cannot fan out without bound.
+  maxConcurrentSubagentBatches: 4,
   subagentCompletionDisplay: "full",
   triggerTurnOnSubagentCompletion: false,
   subagentLaunchDisplay: "full",
@@ -100,6 +103,12 @@ export function loadConfig(cwd: string): CollaboratingAgentsConfig {
       typeof merged.subagentProgressIntervalMs === "number" && merged.subagentProgressIntervalMs >= 0
         ? merged.subagentProgressIntervalMs
         : DEFAULT_CONFIG.subagentProgressIntervalMs,
+    maxConcurrentSubagentBatches:
+      typeof merged.maxConcurrentSubagentBatches === "number" &&
+      Number.isInteger(merged.maxConcurrentSubagentBatches) &&
+      merged.maxConcurrentSubagentBatches >= 0
+        ? merged.maxConcurrentSubagentBatches
+        : DEFAULT_CONFIG.maxConcurrentSubagentBatches,
     subagentCompletionDisplay: isSubagentCompletionDisplay(merged.subagentCompletionDisplay)
       ? merged.subagentCompletionDisplay
       : DEFAULT_CONFIG.subagentCompletionDisplay,

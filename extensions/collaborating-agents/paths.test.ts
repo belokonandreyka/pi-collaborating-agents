@@ -9,6 +9,7 @@ const tempDirs: string[] = [];
 const ORIGINAL_HOME = process.env.HOME;
 const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 const ORIGINAL_COLLAB_DIR = process.env.COLLABORATING_AGENTS_DIR;
+const ORIGINAL_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
 
 function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-`));
@@ -36,11 +37,15 @@ afterEach(() => {
 
   if (typeof ORIGINAL_COLLAB_DIR === "string") process.env.COLLABORATING_AGENTS_DIR = ORIGINAL_COLLAB_DIR;
   else delete process.env.COLLABORATING_AGENTS_DIR;
+
+  if (typeof ORIGINAL_AGENT_DIR === "string") process.env.PI_CODING_AGENT_DIR = ORIGINAL_AGENT_DIR;
+  else delete process.env.PI_CODING_AGENT_DIR;
 });
 
 describe("path resolution", () => {
   test("uses default path under home directory when override is absent", () => {
     delete process.env.COLLABORATING_AGENTS_DIR;
+    delete process.env.PI_CODING_AGENT_DIR;
 
     const dirs = resolveDirs();
     const expectedBase = path.join(homedir(), ".pi", "agent", "collaborating-agents");
@@ -52,6 +57,25 @@ describe("path resolution", () => {
       messageLog: path.join(expectedBase, "messages.jsonl"),
       runs: path.join(expectedBase, "runs"),
     });
+  });
+
+  test("a session in another Pi profile gets that profile's own bus", () => {
+    delete process.env.COLLABORATING_AGENTS_DIR;
+    const profile = makeTempDir("collab-paths-profile");
+    process.env.PI_CODING_AGENT_DIR = profile;
+
+    // Two profiles on one machine used to share ~/.pi/agent's registry, so a
+    // personal session received a work orchestrator's broadcasts and answered them.
+    expect(resolveDirs().base).toBe(path.join(profile, "collaborating-agents"));
+  });
+
+  test("an explicit bus outranks the profile directory", () => {
+    const profile = makeTempDir("collab-paths-profile-explicit");
+    const bus = makeTempDir("collab-paths-bus");
+    process.env.PI_CODING_AGENT_DIR = profile;
+    process.env.COLLABORATING_AGENTS_DIR = bus;
+
+    expect(resolveDirs().base).toBe(bus);
   });
 
   test("uses COLLABORATING_AGENTS_DIR when provided", () => {
