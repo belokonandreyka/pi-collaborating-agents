@@ -1735,6 +1735,10 @@ export async function runSpawnTask(
       ...collectInheritedPaneEnv(),
       PI_AGENT_NAME: result.launchEnv.PI_AGENT_NAME,
       PI_COLLAB_SUBAGENT_DEPTH: result.launchEnv.PI_COLLAB_SUBAGENT_DEPTH,
+      // Pin the parent's bus here too: with PI_CODING_AGENT_DIR pointing at another
+      // profile, the child would otherwise resolve that profile's own empty bus and
+      // neither side could message the other (2026-09-09, browser-verify child).
+      COLLABORATING_AGENTS_DIR: result.launchEnv.COLLABORATING_AGENTS_DIR,
       ...(result.launchEnv.PI_CODING_AGENT_DIR
         ? { PI_CODING_AGENT_DIR: result.launchEnv.PI_CODING_AGENT_DIR }
         : {}),

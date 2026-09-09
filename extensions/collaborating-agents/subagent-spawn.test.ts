@@ -1553,6 +1553,55 @@ describe("subagent spawn", () => {
     expect(result.paneClosed).toBe(true);
   });
 
+  test("a pane child in another profile still gets the parent's bus pinned", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-bus-pin");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+    const envFile = path.join(tempDir, "child-env.json");
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_ENV_FILE = envFile;
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w1:p1";
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    const previousBus = process.env.COLLABORATING_AGENTS_DIR;
+    process.env.PI_CODING_AGENT_DIR = "/tmp/pi-parent";
+    delete process.env.COLLABORATING_AGENTS_DIR;
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "worker",
+      description: "Worker",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/worker.toml",
+      tools: ["read", "bash"],
+    };
+
+    try {
+      // The process-mode env already carried the pin; the pane launch script builds
+      // its env separately and dropped it, so a ~/.pi-sub child saw zero peers.
+      const result = await runSpawnTask(
+        tempDir,
+        { agent: "worker", task: "Inspect the repository" },
+        agentDef,
+        { index: 0, runId: "pane-bus-pin", recursionDepth: 0, launchMode: "herdr-pane", agentDir: "/tmp/pi-sub" },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(fs.readFileSync(envFile, "utf-8"))).toEqual({
+        PI_CODING_AGENT_DIR: "/tmp/pi-sub",
+        COLLABORATING_AGENTS_DIR: path.join("/tmp/pi-parent", "collaborating-agents"),
+      });
+    } finally {
+      delete process.env.TEST_ENV_FILE;
+      if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      if (previousBus !== undefined) process.env.COLLABORATING_AGENTS_DIR = previousBus;
+    }
+  });
+
   test("extends the pane result timeout while the session file is still actively changing", async () => {
     const tempDir = makeTempDir("collab-subagent-pane-active-timeout-extension");
     const { argsFile } = writeFakePiBinary(tempDir);
