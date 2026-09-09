@@ -627,6 +627,37 @@ describe("a child parked on a question", () => {
     expect(result.terminalAssistantText).toBe("Done: three files changed.");
   });
 
+  test("a provider error the child retried past is not a failure", async () => {
+    const tempDir = makeTempDir("collab-await-retried-error");
+    // One "Request timed out." followed by Pi's own retry and more tool work used to
+    // stick as the run's terminal error, so a later pause of a few seconds while
+    // the child was still working settled the run as failed.
+    const sessionFile = writeSession(tempDir, [
+      sessionLine({ stopReason: "toolUse", toolName: "bash", toolArgs: { command: "git log" } }),
+      JSON.stringify({
+        type: "message",
+        id: "m-err",
+        message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Request timed out." },
+      }),
+      sessionLine({ stopReason: "toolUse", toolName: "read", toolArgs: { path: "a.ts" } }),
+    ]);
+    setTimeout(() => {
+      fs.appendFileSync(sessionFile, sessionLine({ text: "Done: three files changed." }) + "\n", "utf-8");
+    }, 400);
+
+    const result = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 30_000,
+      idleGraceMs: 100,
+      errorSettleMs: 150,
+      parentAgentName: "VividQuartz",
+    });
+
+    expect(result.terminalError).toBeUndefined();
+    expect(result.terminalAssistantText).toBe("Done: three files changed.");
+  });
+
   test("an answer arriving in the session supersedes the write-up that preceded it", async () => {
     const tempDir = makeTempDir("collab-await-superseded");
     // Asked, wrote a "blocked" report, then the coordinator's answer landed: that

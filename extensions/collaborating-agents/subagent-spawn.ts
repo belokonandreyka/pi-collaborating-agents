@@ -103,7 +103,10 @@ const PANE_IDLE_GRACE_MS = 1200;
 // no signal at all. A recovering pane keeps writing records, which resets the
 // activity clock, so total silence for this long after an error means it is not
 // coming back.
-const PANE_ERROR_SETTLE_MS = 15_000;
+// Pi retries transient provider errors on its own (3 attempts, 2/4/8 s backoff) and
+// the retried request can itself run to the SDK timeout, so an error message in the
+// transcript is only final once the child has stayed silent well past that.
+const PANE_ERROR_SETTLE_MS = 120_000;
 const PANE_RESULT_TIMEOUT_MS = 600_000;
 const PANE_MAX_IDLE_TIMEOUT_MULTIPLIER = 6;
 const PANE_MAX_IDLE_TIMEOUT_BUFFER_MS = 60_000;
@@ -1123,12 +1126,18 @@ function readSpawnSessionState(
     if (!line.trim()) continue;
     const parsed = parseSessionMessageLine(line, parentAgentName);
     if (parsed.sessionId) sessionId = parsed.sessionId;
-    if (parsed.toolNames?.length) {
+    if (parsed.toolNames !== undefined) {
       toolCount += parsed.toolNames.length;
-      lastTool = parsed.toolNames[parsed.toolNames.length - 1];
+      if (parsed.toolNames.length > 0) lastTool = parsed.toolNames[parsed.toolNames.length - 1];
       // Any later tool call means the child asked and then carried on by itself
       // rather than waiting, so there is nothing outstanding to answer.
       if (!parsed.parentQuestion) pendingQuestion = undefined;
+      // The child is mid-turn again, so an earlier error (a provider timeout it
+      // retried past) or an earlier final text is no longer its last word. Leaving
+      // the error in place failed every child that hit one transient timeout and
+      // then paused for more than the settle window while still working.
+      terminalAssistantText = undefined;
+      terminalError = undefined;
     }
     if (parsed.parentQuestion) pendingQuestion = parsed.parentQuestion;
     // The task prompt itself is a user message, so this also clears a question the
