@@ -96,3 +96,53 @@ describe("path resolution", () => {
     });
   });
 });
+
+describe("resolveProfileAgentDir", () => {
+  const { resolveProfileAgentDir } = require("./paths.ts") as typeof import("./paths.ts");
+
+  function withEnv(vars: Record<string, string | undefined>, run: () => void): void {
+    const saved: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(vars)) {
+      saved[k] = process.env[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try {
+      run();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  }
+
+  test("defaults to ~/.pi/agent", () => {
+    const home = makeTempDir("profile-home");
+    setHome(home);
+    withEnv({ COLLABORATING_AGENTS_DIR: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
+      expect(resolveProfileAgentDir()).toBe(path.join(home, ".pi", "agent"));
+    });
+  });
+
+  test("a standalone session in another profile uses PI_CODING_AGENT_DIR", () => {
+    withEnv({ COLLABORATING_AGENTS_DIR: undefined, PI_CODING_AGENT_DIR: "/tmp/pi-personal/agent" }, () => {
+      expect(resolveProfileAgentDir()).toBe("/tmp/pi-personal/agent");
+    });
+  });
+
+  test("an explicit bus outside any profile does not pick the profile", () => {
+    withEnv({ COLLABORATING_AGENTS_DIR: "/tmp/some-test-state", PI_CODING_AGENT_DIR: "/tmp/pi-personal/agent" }, () => {
+      expect(resolveProfileAgentDir()).toBe("/tmp/pi-personal/agent");
+    });
+  });
+
+  test("a child pinned to its parent's bus keeps the parent's profile", () => {
+    withEnv(
+      { COLLABORATING_AGENTS_DIR: "/tmp/pi-work/agent/collaborating-agents", PI_CODING_AGENT_DIR: "/tmp/pi-sub/agent" },
+      () => {
+        expect(resolveProfileAgentDir()).toBe("/tmp/pi-work/agent");
+      },
+    );
+  });
+});

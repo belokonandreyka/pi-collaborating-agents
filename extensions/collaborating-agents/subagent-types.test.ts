@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { discoverSubagentTypes, getDefaultSubagentType } from "./subagent-types.ts";
+import { discoverSubagentTypes, findSubagentType, getDefaultSubagentType } from "./subagent-types.ts";
 
 const tempDirs: string[] = [];
 const ORIGINAL_HOME = process.env.HOME;
@@ -257,5 +257,34 @@ describe("subagent type discovery", () => {
     const type = discoverSubagentTypes(makeTempDir("types-cwd-notools")).find((t) => t.name === "plain");
 
     expect(type?.tools).toBeUndefined();
+  });
+});
+
+
+describe("profile-aware subagent types", () => {
+  test("a personal-profile session reads ~/.pi-personal/agents/*.toml, not the work profile's", () => {
+    const home = makeTempDir("collab-types-profile-home");
+    setHome(home);
+    const workAgents = path.join(home, ".pi", "agents");
+    const personalAgents = path.join(home, ".pi-personal", "agents");
+    fs.mkdirSync(workAgents, { recursive: true });
+    fs.mkdirSync(personalAgents, { recursive: true });
+    fs.writeFileSync(path.join(workAgents, "worker.toml"), 'name = "worker"\ndescription = "work"\nmodel = "github-copilot/claude-opus-5"\nprompt = "x"\n');
+    fs.writeFileSync(path.join(personalAgents, "worker.toml"), 'name = "worker"\ndescription = "personal"\nmodel = "claude-bridge/claude-opus-5"\nprompt = "x"\n');
+    const cwd = makeTempDir("collab-types-profile-cwd");
+    const savedProfile = process.env.PI_CODING_AGENT_DIR;
+    const savedBus = process.env.COLLABORATING_AGENTS_DIR;
+    delete process.env.COLLABORATING_AGENTS_DIR;
+    try {
+      process.env.PI_CODING_AGENT_DIR = path.join(home, ".pi-personal", "agent");
+      expect(findSubagentType("worker", discoverSubagentTypes(cwd))?.model).toBe("claude-bridge/claude-opus-5");
+      delete process.env.PI_CODING_AGENT_DIR;
+      expect(findSubagentType("worker", discoverSubagentTypes(cwd))?.model).toBe("github-copilot/claude-opus-5");
+    } finally {
+      if (savedProfile === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = savedProfile;
+      if (savedBus === undefined) delete process.env.COLLABORATING_AGENTS_DIR;
+      else process.env.COLLABORATING_AGENTS_DIR = savedBus;
+    }
   });
 });

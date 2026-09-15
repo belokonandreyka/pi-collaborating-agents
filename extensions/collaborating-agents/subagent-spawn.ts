@@ -1,3 +1,4 @@
+import { resolveProfileAgentDir } from "./paths.js";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -470,9 +471,9 @@ function resolveHomeDir(): string {
 }
 
 export function discoverSpawnAgents(cwd: string): SpawnAgentDefinition[] {
-  const homeDir = resolveHomeDir();
-  const legacyUserDir = path.join(homeDir, ".pi", "agent", "agents");
-  const preferredUserDir = path.join(homeDir, ".pi", "agents");
+  const profileDir = resolveProfileAgentDir();
+  const legacyUserDir = path.join(profileDir, "agents");
+  const preferredUserDir = path.join(path.dirname(profileDir), "agents");
   const projectDir = findNearestProjectAgentsDir(cwd);
 
   const userAgents = [
@@ -934,8 +935,12 @@ async function waitForSessionFileOrExitMarker(args: {
   }
 }
 
+export function resolveSubagentSessionsDir(): string {
+  return path.join(resolveProfileAgentDir(), "sessions", "collaborating-agents-subagents");
+}
+
 function createSubagentSessionFilePath(childName: string, runId: string): string {
-  const sessionsDir = path.join(resolveHomeDir(), ".pi", "agent", "sessions", "collaborating-agents-subagents");
+  const sessionsDir = resolveSubagentSessionsDir();
   fs.mkdirSync(sessionsDir, { recursive: true });
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -978,7 +983,7 @@ function createPaneLaunchScript(args: {
   childName: string;
   runId: string;
 }): { scriptPath: string; command: string } {
-  const scriptsDir = path.join(resolveHomeDir(), ".pi", "agent", "tmp", "collaborating-agents-subagents");
+  const scriptsDir = path.join(resolveProfileAgentDir(), "tmp", "collaborating-agents-subagents");
   fs.mkdirSync(scriptsDir, { recursive: true });
 
   const safeChildName = args.childName.replace(/[^a-zA-Z0-9._-]+/g, "-");

@@ -1,3 +1,4 @@
+import { resolveProfileAgentDir } from "./paths.js";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -68,7 +69,7 @@ function readJson(path: string): Record<string, unknown> | null {
 
 export function loadConfig(cwd: string): CollaboratingAgentsConfig {
   const projectPath = join(cwd, ".pi", "collaborating-agents.json");
-  const globalPath = join(resolveHomeDir(), ".pi", "agent", "collaborating-agents.json");
+  const globalPath = join(resolveProfileAgentDir(), "collaborating-agents.json");
 
   const globalConfig = readJson(globalPath) as Partial<CollaboratingAgentsConfig> | null;
   const projectConfig = readJson(projectPath) as Partial<CollaboratingAgentsConfig> | null;

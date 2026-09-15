@@ -1,5 +1,5 @@
+import { resolveProfileAgentDir } from "./paths.js";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SubagentTypeConfig } from "./types.js";
@@ -178,15 +178,6 @@ function appendUniquePath(paths: string[], candidate: string | null): void {
   }
 }
 
-function resolveHomeDir(): string {
-  const envHome = process.env.HOME?.trim();
-  if (envHome) return envHome;
-
-  const envUserProfile = process.env.USERPROFILE?.trim();
-  if (envUserProfile) return envUserProfile;
-
-  return os.homedir();
-}
 
 function isDirectory(dir: string | undefined): dir is string {
   if (!dir) return false;
@@ -277,17 +268,20 @@ function loadBundledWorkerType(): SubagentTypeConfig | null {
  *
  * Resolution precedence (later overrides earlier for matching type names):
  * 1. Bundled defaults in examples/subagents/*.toml
- * 2. User overrides in ~/.pi/agent/subagents/*.toml (legacy), ~/.pi/subagents/*.toml, then ~/.pi/agents/*.toml (preferred)
+ * 2. User overrides in <profile>/subagents/*.toml (legacy), <profile>/../subagents/*.toml, then
+ *    <profile>/../agents/*.toml (preferred) — `<profile>` is ~/.pi/agent or PI_CODING_AGENT_DIR
  * 3. Project overrides in nearest .pi/subagents/*.toml (legacy) then .pi/agents/*.toml (preferred)
  */
 export function discoverSubagentTypes(cwd: string): SubagentTypeConfig[] {
   const bundledTypes = loadBundledSubagentTypes();
 
-  const homeDir = resolveHomeDir();
   const userDirs: string[] = [];
-  appendUniquePath(userDirs, path.join(homeDir, ".pi", "agent", "subagents"));
-  appendUniquePath(userDirs, path.join(homeDir, ".pi", "subagents"));
-  appendUniquePath(userDirs, path.join(homeDir, ".pi", "agents"));
+  // Resolved from the session's profile, not from ~/.pi: a personal-profile session
+  // used to read the work profile's types and launch its subagents on the work gateway.
+  const profileDir = resolveProfileAgentDir();
+  appendUniquePath(userDirs, path.join(profileDir, "subagents"));
+  appendUniquePath(userDirs, path.join(path.dirname(profileDir), "subagents"));
+  appendUniquePath(userDirs, path.join(path.dirname(profileDir), "agents"));
 
   const projectDirs: string[] = [];
   appendUniquePath(projectDirs, findNearestProjectSubagentDir(cwd, [".pi", "subagents"]));

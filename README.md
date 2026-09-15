@@ -495,6 +495,8 @@ Overrides the storage root used by the extension. Resolution order:
 2. `$PI_CODING_AGENT_DIR/collaborating-agents` — a session started in another Pi profile gets its own bus, so two profiles on one machine do not receive each other's broadcasts
 3. `~/.pi/agent/collaborating-agents`
 
+The same profile also owns everything else the extension reads or writes per profile: `collaborating-agents.json`, the subagent type definitions (`<profile>/../agents/*.toml`, i.e. `~/.pi/agents` or `~/.pi-personal/agents`), `sessions/collaborating-agents-subagents/` and `tmp/`. The profile is the one that owns a pinned `<profile>/collaborating-agents` bus (so a child launched into a slimmer `subagentAgentDir` keeps its parent's types and config), else `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`. Before 0.x these paths were fixed to `~/.pi/agent`, and a session in another profile silently spawned with the default profile's types — on the default profile's providers and budget.
+
 This affects:
 
 - `registry/` (active agent registrations)

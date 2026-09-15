@@ -8,7 +8,7 @@ import { Text, matchesKey, type TUI } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { MessagesOverlay } from "./overlays/messages-overlay.js";
 import { loadConfig } from "./config.js";
-import { resolveDirs } from "./paths.js";
+import { resolveDirs, resolveProfileAgentDir } from "./paths.js";
 import {
   formatAgentDisplayName,
   getAgentByName,
@@ -354,7 +354,7 @@ export function formatSubagentRunDetail(record: SubagentRunListRecord, verbose =
 export function findSessionFileBySessionId(sessionId: string | undefined): string | undefined {
   if (!sessionId) return undefined;
 
-  const sessionsRoot = join(resolveHomeDir(), ".pi", "agent", "sessions");
+  const sessionsRoot = join(resolveProfileAgentDir(), "sessions");
   if (!fs.existsSync(sessionsRoot)) return undefined;
 
   const targetSuffix = `_${sessionId}.jsonl`;

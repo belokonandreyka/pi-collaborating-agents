@@ -6,6 +6,7 @@ import type { SpawnAgentDefinition } from "./subagent-spawn.ts";
 import {
   collectInheritedPaneEnv,
   discoverSpawnAgents,
+  resolveSubagentSessionsDir,
   mapWithConcurrencyLimit,
   resetPaneLayoutStateForTests,
   resolveSpawnAgentDefinition,
@@ -2719,5 +2720,46 @@ describe("answering a parked subagent", () => {
 
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.error).toContain("already exited");
+  });
+});
+
+
+describe("profile-aware agent types and session files", () => {
+  function withEnv(vars: Record<string, string | undefined>, run: () => void): void {
+    const saved: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(vars)) {
+      saved[k] = process.env[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try {
+      run();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  }
+
+  test("a personal-profile session sees ~/.pi-personal/agents, not the work profile's types", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "profile-types-"));
+    tempDirs.push(home);
+    const workAgents = path.join(home, ".pi", "agents");
+    const personalAgents = path.join(home, ".pi-personal", "agents");
+    fs.mkdirSync(workAgents, { recursive: true });
+    fs.mkdirSync(personalAgents, { recursive: true });
+    fs.writeFileSync(path.join(workAgents, "worker.md"), "---\nname: worker\ndescription: work\nmodel: github-copilot/claude-opus-5\n---\nx\n");
+    fs.writeFileSync(path.join(personalAgents, "worker.md"), "---\nname: worker\ndescription: personal\nmodel: claude-bridge/claude-opus-5\n---\nx\n");
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "profile-cwd-"));
+    tempDirs.push(cwd);
+    withEnv({ HOME: home, USERPROFILE: home, COLLABORATING_AGENTS_DIR: undefined, PI_CODING_AGENT_DIR: path.join(home, ".pi-personal", "agent") }, () => {
+      const worker = discoverSpawnAgents(cwd).find((a) => a.name === "worker");
+      expect(worker?.model).toBe("claude-bridge/claude-opus-5");
+      expect(resolveSubagentSessionsDir()).toBe(path.join(home, ".pi-personal", "agent", "sessions", "collaborating-agents-subagents"));
+    });
+    withEnv({ HOME: home, USERPROFILE: home, COLLABORATING_AGENTS_DIR: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
+      expect(discoverSpawnAgents(cwd).find((a) => a.name === "worker")?.model).toBe("github-copilot/claude-opus-5");
+    });
   });
 });

@@ -185,3 +185,46 @@ describe("subagentAgentDir", () => {
     expect(loadConfig(process.cwd()).subagentAgentDir).toBeUndefined();
   });
 });
+
+describe("loadConfig profile resolution", () => {
+  function withEnv(vars: Record<string, string | undefined>, run: () => void): void {
+    const saved: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(vars)) {
+      saved[k] = process.env[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try {
+      run();
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  }
+
+  test("a session in another profile reads that profile's collaborating-agents.json, not ~/.pi/agent's", () => {
+    const home = makeTempDir("cfg-home");
+    setHome(home);
+    const workDir = path.join(home, ".pi", "agent");
+    const personalDir = path.join(home, ".pi-personal", "agent");
+    fs.mkdirSync(workDir, { recursive: true });
+    fs.mkdirSync(personalDir, { recursive: true });
+    fs.writeFileSync(path.join(workDir, "collaborating-agents.json"), JSON.stringify({ subagentAgentDir: "~/.pi-sub/agent", messageHistoryLimit: 7 }));
+    fs.writeFileSync(path.join(personalDir, "collaborating-agents.json"), JSON.stringify({ messageHistoryLimit: 9 }));
+    const cwd = makeTempDir("cfg-cwd");
+    withEnv({ COLLABORATING_AGENTS_DIR: undefined, PI_CODING_AGENT_DIR: personalDir }, () => {
+      const cfg = loadConfig(cwd);
+      expect(cfg.messageHistoryLimit).toBe(9);
+      expect(cfg.subagentAgentDir).toBeUndefined();
+    });
+    withEnv({ COLLABORATING_AGENTS_DIR: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
+      expect(loadConfig(cwd).messageHistoryLimit).toBe(7);
+    });
+    // a child pinned to the work bus still spawns with the work config
+    withEnv({ COLLABORATING_AGENTS_DIR: path.join(workDir, "collaborating-agents"), PI_CODING_AGENT_DIR: path.join(home, ".pi-sub", "agent") }, () => {
+      expect(loadConfig(cwd).messageHistoryLimit).toBe(7);
+    });
+  });
+});
