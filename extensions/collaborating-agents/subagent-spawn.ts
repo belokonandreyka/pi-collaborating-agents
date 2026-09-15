@@ -953,21 +953,37 @@ function createSubagentExitMarkerPath(sessionFile: string): string {
   return `${sessionFile}.exit`;
 }
 
-function buildPaneCommand(args: {
+/** `<profile>/pane-env.sh`, sourced by the pane script right before `pi` starts. */
+export function resolvePaneEnvFile(): string {
+  return path.join(resolveProfileAgentDir(), "pane-env.sh");
+}
+
+export function buildPaneCommand(args: {
   piArgs: string[];
   env: Record<string, string>;
   cwd: string;
   exitMarkerPath: string;
+  /**
+   * A pane is the user's interactive shell, so the child sees the shell's own
+   * exports (the default profile's Jira/Bitbucket identity from .zshrc), not
+   * the parent's — an `mpi` orchestrator run with covantex credentials spawned
+   * workers that still carried the VITU ones. The file lets a profile set its
+   * identity at pane start (reading secrets from the Keychain) without any of
+   * it being written into this script.
+   */
+  profileEnvFile?: string;
 }): string {
   const envAssignments = Object.entries(args.env).map(([key, value]) => `${key}=${quoteShellArg(value)}`);
   const envPrefix = envAssignments.length > 0 ? `env ${envAssignments.join(" ")} ` : "";
   const piCommand = buildLaunchCommand(args.piArgs);
   const cwd = quoteShellArg(args.cwd);
   const exitMarkerPath = quoteShellArg(args.exitMarkerPath);
+  const profileEnv = args.profileEnvFile ? quoteShellArg(args.profileEnvFile) : undefined;
 
   return [
     `printf '\\033c'`,
     `cd ${cwd} || exit $?`,
+    ...(profileEnv ? [`if [ -f ${profileEnv} ]; then . ${profileEnv}; fi`] : []),
     `${envPrefix}${piCommand}`,
     `status=$?`,
     `mkdir -p $(dirname ${exitMarkerPath})`,
@@ -990,7 +1006,7 @@ function createPaneLaunchScript(args: {
 
   const safeChildName = args.childName.replace(/[^a-zA-Z0-9._-]+/g, "-");
   const scriptPath = path.join(scriptsDir, `${args.runId.slice(0, 8)}_${safeChildName}.sh`);
-  const scriptBody = buildPaneCommand(args);
+  const scriptBody = buildPaneCommand({ ...args, profileEnvFile: resolvePaneEnvFile() });
   const scriptContent = `#!/usr/bin/env bash\n${scriptBody}\n`;
   fs.writeFileSync(scriptPath, scriptContent, { encoding: "utf-8", mode: 0o700 });
 

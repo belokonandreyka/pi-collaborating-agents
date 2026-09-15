@@ -5,7 +5,9 @@ import * as path from "node:path";
 import type { SpawnAgentDefinition } from "./subagent-spawn.ts";
 import {
   collectInheritedPaneEnv,
+  buildPaneCommand,
   discoverSpawnAgents,
+  resolvePaneEnvFile,
   resolveSubagentSessionsDir,
   mapWithConcurrencyLimit,
   resetPaneLayoutStateForTests,
@@ -2761,5 +2763,41 @@ describe("profile-aware agent types and session files", () => {
     withEnv({ HOME: home, USERPROFILE: home, COLLABORATING_AGENTS_DIR: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
       expect(discoverSpawnAgents(cwd).find((a) => a.name === "worker")?.model).toBe("github-copilot/claude-opus-5");
     });
+  });
+});
+
+
+describe("pane script profile env", () => {
+  test("sources <profile>/pane-env.sh before pi, after the cd, only when the file exists", () => {
+    const cmd = buildPaneCommand({
+      piArgs: ["--name", "w"],
+      env: { PATH: "/usr/bin" },
+      cwd: "/tmp/repo",
+      exitMarkerPath: "/tmp/m",
+      profileEnvFile: "/home/u/.pi-personal/agent/pane-env.sh",
+    });
+    const source = "if [ -f /home/u/.pi-personal/agent/pane-env.sh ]; then . /home/u/.pi-personal/agent/pane-env.sh; fi";
+    expect(cmd).toContain(source);
+    const cdAt = cmd.indexOf("cd /tmp/repo || exit $?");
+    const sourceAt = cmd.indexOf(source);
+    const piAt = cmd.indexOf("env PATH=/usr/bin pi --name w");
+    expect(cdAt).toBeGreaterThanOrEqual(0);
+    expect(piAt).toBeGreaterThan(sourceAt);
+    expect(sourceAt).toBeGreaterThan(cdAt);
+    expect(buildPaneCommand({ piArgs: [], env: {}, cwd: "/tmp/repo", exitMarkerPath: "/tmp/m" })).not.toContain("pane-env");
+  });
+
+  test("the file lives in the session's profile", () => {
+    const saved = { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, COLLABORATING_AGENTS_DIR: process.env.COLLABORATING_AGENTS_DIR };
+    try {
+      delete process.env.COLLABORATING_AGENTS_DIR;
+      process.env.PI_CODING_AGENT_DIR = "/tmp/pi-personal/agent";
+      expect(resolvePaneEnvFile()).toBe("/tmp/pi-personal/agent/pane-env.sh");
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 });

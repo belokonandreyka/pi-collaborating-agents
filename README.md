@@ -497,6 +497,8 @@ Overrides the storage root used by the extension. Resolution order:
 
 The same profile also owns everything else the extension reads or writes per profile: `collaborating-agents.json`, the subagent type definitions (`<profile>/../agents/*.toml`, i.e. `~/.pi/agents` or `~/.pi-personal/agents`), `sessions/collaborating-agents-subagents/` and `tmp/`. The profile is the one that owns a pinned `<profile>/collaborating-agents` bus (so a child launched into a slimmer `subagentAgentDir` keeps its parent's types and config), else `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`. Before 0.x these paths were fixed to `~/.pi/agent`, and a session in another profile silently spawned with the default profile's types — on the default profile's providers and budget.
 
+A pane is the user's interactive shell, so a pane-launched child sees that shell's own exports (the default profile's Jira/Bitbucket identity from `.zshrc`) rather than the parent's. If `<profile>/pane-env.sh` exists, the pane script sources it right before starting `pi`, so a profile can set its identity there — reading secrets from the Keychain at pane start instead of writing them into the script.
+
 This affects:
 
 - `registry/` (active agent registrations)
