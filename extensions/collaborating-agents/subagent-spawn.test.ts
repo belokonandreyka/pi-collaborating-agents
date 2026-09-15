@@ -2751,8 +2751,8 @@ describe("profile-aware agent types and session files", () => {
     fs.mkdirSync(personalAgents, { recursive: true });
     fs.writeFileSync(path.join(workAgents, "worker.md"), "---\nname: worker\ndescription: work\nmodel: github-copilot/claude-opus-5\n---\nx\n");
     fs.writeFileSync(path.join(personalAgents, "worker.md"), "---\nname: worker\ndescription: personal\nmodel: claude-bridge/claude-opus-5\n---\nx\n");
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "profile-cwd-"));
-    tempDirs.push(cwd);
+    const cwd = path.join(home, "MS", "web-ui"); // under $HOME, where ~/.pi/agents used to pass for a project dir
+    fs.mkdirSync(cwd, { recursive: true });
     withEnv({ HOME: home, USERPROFILE: home, COLLABORATING_AGENTS_DIR: undefined, PI_CODING_AGENT_DIR: path.join(home, ".pi-personal", "agent") }, () => {
       const worker = discoverSpawnAgents(cwd).find((a) => a.name === "worker");
       expect(worker?.model).toBe("claude-bridge/claude-opus-5");

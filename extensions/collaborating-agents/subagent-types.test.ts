@@ -271,7 +271,9 @@ describe("profile-aware subagent types", () => {
     fs.mkdirSync(personalAgents, { recursive: true });
     fs.writeFileSync(path.join(workAgents, "worker.toml"), 'name = "worker"\ndescription = "work"\nmodel = "github-copilot/claude-opus-5"\nprompt = "x"\n');
     fs.writeFileSync(path.join(personalAgents, "worker.toml"), 'name = "worker"\ndescription = "personal"\nmodel = "claude-bridge/claude-opus-5"\nprompt = "x"\n');
-    const cwd = makeTempDir("collab-types-profile-cwd");
+    // cwd under $HOME: the project walk used to reach ~/.pi/agents and take it for a project override
+    const cwd = path.join(home, "MS", "web-ui");
+    fs.mkdirSync(cwd, { recursive: true });
     const savedProfile = process.env.PI_CODING_AGENT_DIR;
     const savedBus = process.env.COLLABORATING_AGENTS_DIR;
     delete process.env.COLLABORATING_AGENTS_DIR;

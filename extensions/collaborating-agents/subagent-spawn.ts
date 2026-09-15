@@ -445,8 +445,10 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): SpawnAgentD
 }
 
 function findNearestProjectAgentsDir(cwd: string): string | null {
+  const home = resolveHomeDir();
   let current = cwd;
   while (true) {
+    if (current === home) return null; // ~/.pi/agents is the default profile's, not a project's
     const candidate = path.join(current, ".pi", "agents");
     try {
       if (fs.statSync(candidate).isDirectory()) return candidate;

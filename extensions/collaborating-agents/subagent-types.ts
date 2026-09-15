@@ -1,5 +1,6 @@
 import { resolveProfileAgentDir } from "./paths.js";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SubagentTypeConfig } from "./types.js";
@@ -179,6 +180,14 @@ function appendUniquePath(paths: string[], candidate: string | null): void {
 }
 
 
+function resolveUserHomeDir(): string {
+  const envHome = process.env.HOME?.trim();
+  if (envHome) return envHome;
+  const envUserProfile = process.env.USERPROFILE?.trim();
+  if (envUserProfile) return envUserProfile;
+  return os.homedir();
+}
+
 function isDirectory(dir: string | undefined): dir is string {
   if (!dir) return false;
   try {
@@ -189,8 +198,13 @@ function isDirectory(dir: string | undefined): dir is string {
 }
 
 function findNearestProjectSubagentDir(cwd: string, relativeSegments: string[]): string | null {
+  // Every project lives under $HOME, so the walk must stop before it: ~/.pi/agents is
+  // the default profile's user dir, and treating it as a "project" override let the
+  // work profile's types win over another profile's own.
+  const home = resolveUserHomeDir();
   let current = cwd;
   while (true) {
+    if (current === home) return null;
     const candidate = path.join(current, ...relativeSegments);
     if (isDirectory(candidate)) return candidate;
 
