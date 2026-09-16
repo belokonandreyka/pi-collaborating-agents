@@ -2801,3 +2801,172 @@ describe("pane script profile env", () => {
     }
   });
 });
+describe("subagent spawn model provider selection", () => {
+  test("should pass canonical provider/model as explicit --provider and --model flags", async () => {
+    const tempDir = makeTempDir("collab-subagent-model-canonical");
+    const { argsFile } = writeFakePiBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "scout",
+      description: "Scout",
+      model: "github-copilot/claude-opus-4.7",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/scout.toml",
+      tools: ["read"],
+    };
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "scout", task: "Find things" },
+      agentDef,
+      { index: 0, runId: "testrun-model-canonical", recursionDepth: 0 },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resolvedModel).toBe("github-copilot/claude-opus-4.7");
+    expect(result.warnings).toBeUndefined();
+
+    const capturedArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
+    expect(capturedArgs).not.toContain("--models");
+    const providerIdx = capturedArgs.indexOf("--provider");
+    const modelIdx = capturedArgs.indexOf("--model");
+    expect(providerIdx).toBeGreaterThanOrEqual(0);
+    expect(capturedArgs[providerIdx + 1]).toBe("github-copilot");
+    expect(modelIdx).toBeGreaterThanOrEqual(0);
+    expect(capturedArgs[modelIdx + 1]).toBe("claude-opus-4.7");
+
+    expect(result.launchArgs).toContain("--provider");
+    expect(result.launchArgs).toContain("github-copilot");
+    expect(result.launchArgs).toContain("--model");
+    expect(result.launchArgs).toContain("claude-opus-4.7");
+    expect(result.launchArgs).not.toContain("--models");
+    expect(result.launchCommand).toContain("--provider github-copilot");
+    expect(result.launchCommand).toContain("--model claude-opus-4.7");
+    expect(result.launchCommand).not.toContain("--models");
+  });
+
+  test("should split only the first slash so provider-prefixed model ids keep the rest as model id", async () => {
+    const tempDir = makeTempDir("collab-subagent-model-nested");
+    const { argsFile } = writeFakePiBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "scout",
+      description: "Scout",
+      model: "openrouter/openai/gpt-4o",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/scout.toml",
+      tools: ["read"],
+    };
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "scout", task: "Find things" },
+      agentDef,
+      { index: 0, runId: "testrun-model-nested", recursionDepth: 0 },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resolvedModel).toBe("openrouter/openai/gpt-4o");
+    expect(result.warnings).toBeUndefined();
+
+    const capturedArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
+    expect(capturedArgs).not.toContain("--models");
+    const providerIdx = capturedArgs.indexOf("--provider");
+    const modelIdx = capturedArgs.indexOf("--model");
+    expect(capturedArgs[providerIdx + 1]).toBe("openrouter");
+    expect(capturedArgs[modelIdx + 1]).toBe("openai/gpt-4o");
+  });
+
+  test("should treat a bare model id as legacy: emit --model only and add a provider-inference warning", async () => {
+    const tempDir = makeTempDir("collab-subagent-model-bare");
+    const { argsFile } = writeFakePiBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "scout",
+      description: "Scout",
+      model: "claude-opus-4.7",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/scout.toml",
+      tools: ["read"],
+    };
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "scout", task: "Find things" },
+      agentDef,
+      { index: 0, runId: "testrun-model-bare", recursionDepth: 0 },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.resolvedModel).toBe("claude-opus-4.7");
+
+    const capturedArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
+    expect(capturedArgs).not.toContain("--models");
+    expect(capturedArgs).not.toContain("--provider");
+    const modelIdx = capturedArgs.indexOf("--model");
+    expect(modelIdx).toBeGreaterThanOrEqual(0);
+    expect(capturedArgs[modelIdx + 1]).toBe("claude-opus-4.7");
+
+    expect(result.warnings ?? []).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/no explicit provider/i),
+      ]),
+    );
+  });
+
+  test("should use explicit --provider and --model in the herdr pane launch script too", async () => {
+    const tempDir = makeTempDir("collab-subagent-model-herdr");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w1:p1";
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "worker",
+      description: "Worker",
+      model: "github-copilot/claude-opus-4.7",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/worker.toml",
+      tools: ["read", "bash"],
+    };
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "worker", task: "Inspect" },
+      agentDef,
+      { index: 0, runId: "testrun-model-herdr", recursionDepth: 0, launchMode: "herdr-pane" },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.launchArgs).toContain("--provider");
+    expect(result.launchArgs).toContain("github-copilot");
+    expect(result.launchArgs).toContain("--model");
+    expect(result.launchArgs).toContain("claude-opus-4.7");
+    expect(result.launchArgs).not.toContain("--models");
+
+    const capturedPiArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
+    const providerIdx = capturedPiArgs.indexOf("--provider");
+    const modelIdx = capturedPiArgs.indexOf("--model");
+    expect(capturedPiArgs[providerIdx + 1]).toBe("github-copilot");
+    expect(capturedPiArgs[modelIdx + 1]).toBe("claude-opus-4.7");
+    expect(capturedPiArgs).not.toContain("--models");
+  }, 10000);
+});

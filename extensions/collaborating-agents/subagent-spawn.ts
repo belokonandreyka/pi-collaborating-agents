@@ -762,6 +762,34 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+interface ParsedTypeModelSpec {
+  provider?: string;
+  modelId: string;
+  warning?: string;
+}
+
+// Split canonical `provider/modelId` from a subagent type config `model` field.
+// modelId may contain additional slashes (e.g. openrouter/openai/gpt-4o).
+// A bare id (no slash) is accepted for legacy configs but flagged so callers
+// can surface that provider selection is left to Pi.
+function parseTypeModelSpec(raw: string): ParsedTypeModelSpec | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+
+  const slashIndex = trimmed.indexOf("/");
+  if (slashIndex <= 0 || slashIndex === trimmed.length - 1) {
+    return {
+      modelId: trimmed,
+      warning: `Subagent type model "${trimmed}" has no explicit provider; Pi will infer one. Use canonical "<provider>/<model-id>" for deterministic provider selection.`,
+    };
+  }
+
+  return {
+    provider: trimmed.slice(0, slashIndex),
+    modelId: trimmed.slice(slashIndex + 1),
+  };
+}
+
 function pushSpawnWarning(result: SpawnResult, warning: string): void {
   result.warnings ??= [];
   if (!result.warnings.includes(warning)) result.warnings.push(warning);
@@ -1648,7 +1676,15 @@ export async function runSpawnTask(
   // every child exit with "Unknown option" before it starts.
 
   const model = agentDef.model;
-  if (model) commonArgs.push("--models", model);
+  const modelSpec = model ? parseTypeModelSpec(model) : undefined;
+  if (modelSpec) {
+    // A type-config `model` is a single override, not a Ctrl+P cycling scope,
+    // so emit strict --provider/--model. --models would let Pi cycle to a
+    // different provider's registry entry (bug: canonical
+    // github-copilot/claude-opus-4.8 was resolving to claude-bridge).
+    if (modelSpec.provider) commonArgs.push("--provider", modelSpec.provider);
+    commonArgs.push("--model", modelSpec.modelId);
+  }
 
   const requestedTools = [...new Set((agentDef.tools ?? []).map((tool) => tool.trim()).filter(Boolean))];
 
@@ -1747,6 +1783,7 @@ export async function runSpawnTask(
     resolvedTools: requestedTools.length > 0 ? [...requestedTools] : undefined,
     coordinator: options.parentAgentName,
   };
+  if (modelSpec?.warning) pushSpawnWarning(result, modelSpec.warning);
   const sessionMetadata = createSessionMetadataNotifier(result, options.onSessionMetadata);
 
   if (launchDelayMs > 0) {
