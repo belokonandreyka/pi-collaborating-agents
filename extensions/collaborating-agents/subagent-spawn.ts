@@ -966,8 +966,8 @@ export function buildPaneCommand(args: {
   /**
    * A pane is the user's interactive shell, so the child sees the shell's own
    * exports (the default profile's Jira/Bitbucket identity from .zshrc), not
-   * the parent's — an `mpi` orchestrator run with covantex credentials spawned
-   * workers that still carried the VITU ones. The file lets a profile set its
+   * the parent's — a second-profile orchestrator run spawned workers that
+   * still carried the default profile's identity. The file lets a profile set its
    * identity at pane start (reading secrets from the Keychain) without any of
    * it being written into this script.
    */

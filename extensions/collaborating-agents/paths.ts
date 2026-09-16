@@ -23,7 +23,7 @@ import type { Dirs } from "./types.js";
  *    not a profile's own (an explicit test dir, say) says nothing about the profile;
  * 2. `PI_CODING_AGENT_DIR` — a standalone session in another profile. Before this the
  *    personal profile read the work profile's types and launched its subagents on the
- *    work gateway (2026-09-09, six MEET runs billed to VITU);
+ *    work gateway (2026-09-09, six personal runs billed to the work account);
  * 3. `~/.pi/agent`.
  */
 export function resolveProfileAgentDir(): string {
