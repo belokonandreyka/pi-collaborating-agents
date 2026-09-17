@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadConfig } from "./config.ts";
+import { loadConfig, resolveSubagentPanePlacement } from "./config.ts";
 
 const tempDirs: string[] = [];
 const ORIGINAL_HOME = process.env.HOME;
@@ -19,6 +19,8 @@ const DEFAULT_CONFIG = {
   subagentCompletionDisplay: "full",
   triggerTurnOnSubagentCompletion: false,
   subagentLaunchDisplay: "full",
+  subagentPanePlacement: "split",
+  subagentTabBelowColumns: 100,
 };
 
 function makeTempDir(prefix: string): string {
@@ -112,6 +114,8 @@ describe("config loading", () => {
       subagentCompletionDisplay: "hidden",
       triggerTurnOnSubagentCompletion: true,
       subagentLaunchDisplay: "compact",
+      subagentPanePlacement: "split",
+      subagentTabBelowColumns: 100,
     });
   });
 
@@ -226,5 +230,41 @@ describe("loadConfig profile resolution", () => {
     withEnv({ COLLABORATING_AGENTS_DIR: path.join(workDir, "collaborating-agents"), PI_CODING_AGENT_DIR: path.join(home, ".pi-sub", "agent") }, () => {
       expect(loadConfig(cwd).messageHistoryLimit).toBe(7);
     });
+  });
+});
+
+describe("subagentPanePlacement", () => {
+  test("defaults to split with a 100-column auto threshold", () => {
+    setHome(makeTempDir("collab-config-placement-home"));
+    const config = loadConfig(makeTempDir("collab-config-placement-default"));
+    expect(config.subagentPanePlacement).toBe("split");
+    expect(config.subagentTabBelowColumns).toBe(100);
+  });
+
+  test("auto resolves to a tab only when the terminal is narrower than the threshold", () => {
+    expect(resolveSubagentPanePlacement("auto", 100, 50)).toBe("tab");
+    expect(resolveSubagentPanePlacement("auto", 100, 100)).toBe("split");
+    expect(resolveSubagentPanePlacement("auto", 100, 293)).toBe("split");
+    expect(resolveSubagentPanePlacement("auto", 100, undefined)).toBe("split");
+    expect(resolveSubagentPanePlacement("tab", 100, 293)).toBe("tab");
+    expect(resolveSubagentPanePlacement("split", 100, 50)).toBe("split");
+  });
+
+  test("reads placement and threshold from config and rejects bad values", () => {
+    const homeDir = makeTempDir("collab-config-placement-file");
+    setHome(homeDir);
+    const agentDir = path.join(homeDir, ".pi", "agent");
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(path.join(agentDir, "collaborating-agents.json"),
+      JSON.stringify({ subagentPanePlacement: "auto", subagentTabBelowColumns: 120 }), "utf-8");
+    const config = loadConfig(makeTempDir("collab-config-placement-cwd"));
+    expect(config.subagentPanePlacement).toBe("auto");
+    expect(config.subagentTabBelowColumns).toBe(120);
+
+    fs.writeFileSync(path.join(agentDir, "collaborating-agents.json"),
+      JSON.stringify({ subagentPanePlacement: "window", subagentTabBelowColumns: -5 }), "utf-8");
+    const fallback = loadConfig(makeTempDir("collab-config-placement-cwd2"));
+    expect(fallback.subagentPanePlacement).toBe("split");
+    expect(fallback.subagentTabBelowColumns).toBe(100);
   });
 });

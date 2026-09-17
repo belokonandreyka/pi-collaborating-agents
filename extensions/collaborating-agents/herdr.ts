@@ -242,6 +242,31 @@ export async function herdrSplitPane(args: {
 }
 
 /**
+ * Opens a new tab in the workspace and returns its root pane. The tab is not
+ * focused: the orchestrator stays in front and the subagent is one tab away,
+ * which is the point on a screen too narrow to split.
+ */
+export async function herdrCreateTab(args: {
+  workspaceId: string;
+  cwd?: string;
+  label?: string;
+  env?: Record<string, string>;
+}): Promise<HerdrResult<HerdrPane>> {
+  const commandArgs = ["tab", "create", "--workspace", args.workspaceId, "--no-focus"];
+  if (args.cwd) commandArgs.push("--cwd", args.cwd);
+  if (args.label) commandArgs.push("--label", args.label);
+  for (const [key, value] of Object.entries(args.env ?? {})) {
+    commandArgs.push("--env", `${key}=${value}`);
+  }
+
+  const envelope = parseHerdrEnvelope(await runHerdrCommand(commandArgs));
+  if (!envelope.ok) return envelope;
+
+  const pane = parseHerdrPane(envelope.value.root_pane);
+  return pane ? { ok: true, value: pane } : { ok: false, error: "herdr tab create returned no root pane" };
+}
+
+/**
  * Types a line into the pane's shell. `send-text` alone leaves the line
  * unsubmitted, so the Enter key press is part of the same operation.
  */

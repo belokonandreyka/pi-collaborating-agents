@@ -7,7 +7,7 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import { Text, matchesKey, type TUI } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { MessagesOverlay } from "./overlays/messages-overlay.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, resolveSubagentPanePlacement } from "./config.js";
 import { resolveDirs, resolveProfileAgentDir } from "./paths.js";
 import {
   formatAgentDisplayName,
@@ -1640,6 +1640,11 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         closeCompletedPane: config.closeCompletedPanes,
         closeFailedPane: config.closeFailedPanes,
         preserveOrchestratorPane: config.preserveOrchestratorPane,
+        panePlacement: resolveSubagentPanePlacement(
+          config.subagentPanePlacement,
+          config.subagentTabBelowColumns,
+          process.stdout.columns,
+        ),
         onLaunch: (launch) => {
           markSubagentRunLaunched(childRunIds[0]!, typeConfig.name, launch, runRecordWarnings);
           progressName = launch.name || progressName;
@@ -1735,6 +1740,11 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         closeCompletedPane: config.closeCompletedPanes,
         closeFailedPane: config.closeFailedPanes,
         preserveOrchestratorPane: config.preserveOrchestratorPane,
+        panePlacement: resolveSubagentPanePlacement(
+          config.subagentPanePlacement,
+          config.subagentTabBelowColumns,
+          process.stdout.columns,
+        ),
         onLaunch: (launch) => {
           markSubagentRunLaunched(recordId, typeConfig.name, launch, runRecordWarnings);
           progressName = launch.name || progressName;

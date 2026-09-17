@@ -7,6 +7,7 @@ import type {
   SubagentCompletionDisplay,
   SubagentLaunchDisplay,
   SubagentLaunchMode,
+  SubagentPanePlacement,
 } from "./types.js";
 
 const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
@@ -24,6 +25,8 @@ const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
   subagentCompletionDisplay: "full",
   triggerTurnOnSubagentCompletion: false,
   subagentLaunchDisplay: "full",
+  subagentPanePlacement: "split",
+  subagentTabBelowColumns: 100,
 };
 
 function isSubagentLaunchMode(value: unknown): value is SubagentLaunchMode {
@@ -32,6 +35,23 @@ function isSubagentLaunchMode(value: unknown): value is SubagentLaunchMode {
 
 function isSubagentCompletionDisplay(value: unknown): value is SubagentCompletionDisplay {
   return value === "full" || value === "hidden";
+}
+
+function isSubagentPanePlacement(value: unknown): value is SubagentPanePlacement {
+  return value === "split" || value === "tab" || value === "auto";
+}
+
+/**
+ * Resolves `auto` against the orchestrator's terminal width. An unknown width
+ * (no TTY, tests) keeps the split, which is what every caller had before.
+ */
+export function resolveSubagentPanePlacement(
+  placement: SubagentPanePlacement,
+  tabBelowColumns: number,
+  columns: number | undefined,
+): "split" | "tab" {
+  if (placement !== "auto") return placement;
+  return typeof columns === "number" && columns > 0 && columns < tabBelowColumns ? "tab" : "split";
 }
 
 function isSubagentLaunchDisplay(value: unknown): value is SubagentLaunchDisplay {
@@ -120,6 +140,15 @@ export function loadConfig(cwd: string): CollaboratingAgentsConfig {
     subagentLaunchDisplay: isSubagentLaunchDisplay(merged.subagentLaunchDisplay)
       ? merged.subagentLaunchDisplay
       : DEFAULT_CONFIG.subagentLaunchDisplay,
+    subagentPanePlacement: isSubagentPanePlacement(merged.subagentPanePlacement)
+      ? merged.subagentPanePlacement
+      : DEFAULT_CONFIG.subagentPanePlacement,
+    subagentTabBelowColumns:
+      typeof merged.subagentTabBelowColumns === "number" &&
+      Number.isInteger(merged.subagentTabBelowColumns) &&
+      merged.subagentTabBelowColumns > 0
+        ? merged.subagentTabBelowColumns
+        : DEFAULT_CONFIG.subagentTabBelowColumns,
     subagentAgentDir: resolveAgentDirSetting(merged.subagentAgentDir),
   };
 }

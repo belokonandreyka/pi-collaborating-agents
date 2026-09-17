@@ -9,6 +9,7 @@ import { resolveDirs } from "./paths.js";
 import type { SubagentLaunchMode, SubagentTypeConfig } from "./types.js";
 import {
   herdrCallerPaneFromEnv,
+  herdrCreateTab,
   herdrClosePane,
   herdrListPanes,
   herdrReadPane,
@@ -1419,6 +1420,7 @@ async function launchHerdrPane(args: {
   scriptPath: string;
   preserveOrchestratorPane: boolean;
   cwd: string;
+  panePlacement?: "split" | "tab";
 }): Promise<
   | {
       ok: true;
@@ -1447,6 +1449,26 @@ async function launchHerdrPane(args: {
       paneRef: caller.paneId,
       surfaceRef: caller.paneId,
     };
+
+    if (args.panePlacement === "tab") {
+      // A tab pane is not part of the split tree: it must never become the
+      // target of a later split, and it needs no balancing.
+      const tab = await herdrCreateTab({ workspaceId: caller.workspaceId, cwd: args.cwd });
+      if (!tab.ok) return { ok: false, error: tab.error };
+
+      const send = await herdrSendLine(tab.value.paneId, args.scriptPath);
+      if (!send.ok) {
+        await herdrClosePane(tab.value.paneId);
+        return { ok: false, error: send.error };
+      }
+
+      return {
+        ok: true,
+        workspaceRef: tab.value.workspaceId,
+        paneRef: tab.value.paneId,
+        surfaceRef: tab.value.paneId,
+      };
+    }
 
     const layoutState = getOrCreatePaneWorkspaceLayout(callerContext);
     const beforeSnapshot = await snapshotHerdrWorkspace(caller.workspaceId);
@@ -1507,7 +1529,7 @@ export function isPaneLaunchMode(mode: SubagentLaunchMode): boolean {
 }
 
 async function launchSubagentPane(
-  args: { scriptPath: string; preserveOrchestratorPane: boolean; cwd: string },
+  args: { scriptPath: string; preserveOrchestratorPane: boolean; cwd: string; panePlacement?: "split" | "tab" },
 ): Promise<
   { ok: true; workspaceRef: string; paneRef: string; surfaceRef: string } | { ok: false; error: string }
 > {
@@ -1662,6 +1684,8 @@ export async function runSpawnTask(
     closeCompletedPane?: boolean;
     closeFailedPane?: boolean;
     preserveOrchestratorPane?: boolean;
+    /** herdr-pane mode only: split the current tab (default) or open a new tab. */
+    panePlacement?: "split" | "tab";
     paneResultTimeoutMs?: number;
     onLaunch?: (launch: SpawnResult) => void | Promise<void>;
     onSessionMetadata?: SpawnSessionMetadataCallback;
@@ -1823,6 +1847,7 @@ export async function runSpawnTask(
     const paneLaunch = await launchSubagentPane({
       scriptPath: paneLaunchScript.command,
       preserveOrchestratorPane: options.preserveOrchestratorPane ?? false,
+      panePlacement: options.panePlacement,
       cwd,
     });
 

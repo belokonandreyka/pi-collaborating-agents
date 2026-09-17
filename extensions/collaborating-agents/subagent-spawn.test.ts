@@ -2359,10 +2359,21 @@ function flag(name) {
   return index >= 0 ? args[index + 1] : null;
 }
 
-if (args[0] !== "pane") fail("unsupported", "only pane commands are faked");
+if (args[0] !== "pane" && args[0] !== "tab") fail("unsupported", "only pane and tab commands are faked");
 
 const command = args[1];
 const state = readState();
+
+if (args[0] === "tab") {
+  if (command !== "create") fail("unsupported", "only tab create is faked");
+  const id = "w1:p" + state.nextPane;
+  state.nextPane += 1;
+  state.panes.push(id);
+  writeState(state);
+  const root = paneInfo(id);
+  root.tab_id = "w1:t2";
+  ok({ root_pane: root, tab: { tab_id: "w1:t2", workspace_id: "w1" }, type: "tab_created" });
+}
 
 if (command === "list") {
   ok({ panes: state.panes.map(paneInfo), type: "pane_list" });
@@ -2442,6 +2453,54 @@ describe("herdr pane launch mode", () => {
     filePath: "/tmp/worker.toml",
     tools: ["read", "bash"],
   };
+
+  test("opens a new tab instead of splitting when panePlacement is tab", async () => {
+    const tempDir = makeTempDir("collab-subagent-herdr-tab");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w1:p1";
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "worker", task: "Inspect the repository" },
+      agentDef,
+      {
+        index: 0,
+        runId: "testruntab",
+        recursionDepth: 0,
+        launchMode: "herdr-pane",
+        panePlacement: "tab",
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toBe("fake-ok");
+    expect(result.launchMode).toBe("herdr-pane");
+    expect(result.workspaceRef).toBe("w1");
+    expect(result.paneRef).toBe("w1:p2");
+    expect(result.paneClosed).toBe(true);
+
+    const captured = getCapturedHerdrArgs(herdrArgsFile);
+    expect(captured.map((entry) => `${entry[0]} ${entry[1]}`)).toEqual([
+      "tab create",
+      "pane send-text",
+      "pane send-keys",
+      "pane close",
+    ]);
+
+    const tabArgs = captured[0]!;
+    expect(tabArgs).toContain("--workspace");
+    expect(tabArgs).toContain("w1");
+    expect(tabArgs).toContain("--no-focus");
+    expect(tabArgs).toContain("--cwd");
+    expect(captured[1]![2]).toBe("w1:p2");
+  });
 
   test("launches a subagent in a herdr pane and collects final session output", async () => {
     const tempDir = makeTempDir("collab-subagent-herdr-pane");

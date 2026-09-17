@@ -86,6 +86,14 @@ export interface ExtensionState {
 
 export type SubagentLaunchMode = "process" | "herdr-pane";
 
+/**
+ * Where a herdr-pane subagent goes: a split of the current tab, a new tab, or
+ * `auto`, which picks a tab when the orchestrator's terminal is narrower than
+ * `subagentTabBelowColumns` (a phone client at 50 columns split to 22 once and
+ * crashed both sides).
+ */
+export type SubagentPanePlacement = "split" | "tab" | "auto";
+
 export type SubagentCompletionDisplay = "full" | "hidden";
 
 export type SubagentLaunchDisplay = "full" | "compact" | "hidden";
@@ -168,6 +176,9 @@ export interface CollaboratingAgentsConfig {
   subagentCompletionDisplay: SubagentCompletionDisplay;
   triggerTurnOnSubagentCompletion: boolean;
   subagentLaunchDisplay: SubagentLaunchDisplay;
+  subagentPanePlacement: SubagentPanePlacement;
+  /** With `subagentPanePlacement: "auto"`, terminals narrower than this get a tab instead of a split. */
+  subagentTabBelowColumns: number;
   /** Pi config directory (`PI_CODING_AGENT_DIR`) for spawned subagents. Unset = inherit the parent's. */
   subagentAgentDir?: string;
 }

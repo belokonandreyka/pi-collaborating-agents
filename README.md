@@ -391,6 +391,17 @@ Example:
 }
 ```
 
+#### `subagentPanePlacement` (`"split"` | `"tab"` | `"auto"`, default: `"split"`)
+
+Where a `herdr-pane` subagent goes. `"split"` divides the current tab as
+described above. `"tab"` runs `herdr tab create --no-focus` in the orchestrator's
+workspace and starts the subagent in that tab's pane, leaving the orchestrator's
+layout untouched; tab panes never become split targets. `"auto"` picks `"tab"`
+when the orchestrator's terminal is narrower than `subagentTabBelowColumns`
+(default `100`) and `"split"` otherwise, so a phone client attached over mosh at
+50 columns gets tabs while the desktop keeps its grid. Completed and failed panes
+close the same way in both placements.
+
 #### `preserveOrchestratorPane` (boolean, default: `false`)
 
 Controls whether the orchestrator keeps the half created by the first pane split.
