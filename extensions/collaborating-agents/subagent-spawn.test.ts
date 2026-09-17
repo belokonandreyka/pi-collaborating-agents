@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -341,6 +341,14 @@ function writeFakeHerdrState(
 ): void {
   fs.writeFileSync(`${argsFile}.state.json`, JSON.stringify(state), "utf-8");
 }
+
+// Every test gets a throwaway HOME: the spawn path resolves the profile from
+// HOME, and tests that never called setHome() wrote their session files into
+// the real ~/.pi/agent/sessions/collaborating-agents-subagents (2,300 files
+// between 2026-07-18 and 2026-09-17).
+beforeEach(() => {
+  setHome(makeTempDir("collab-home"));
+});
 
 afterEach(() => {
   resetPaneLayoutStateForTests();
