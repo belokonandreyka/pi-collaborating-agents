@@ -2849,6 +2849,68 @@ describe("subagent spawn model provider selection", () => {
     expect(result.launchCommand).not.toContain("--models");
   });
 
+  test("should forward the type's reasoning level as --thinking", async () => {
+    const tempDir = makeTempDir("collab-subagent-reasoning");
+    const { argsFile } = writeFakePiBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "reviewer",
+      description: "Reviewer",
+      model: "github-copilot/gpt-5.6-sol",
+      reasoning: "xhigh",
+      systemPrompt: "Review only.",
+      source: "bundled",
+      filePath: "/tmp/reviewer.toml",
+      tools: ["read"],
+    };
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "reviewer", task: "Review things" },
+      agentDef,
+      { index: 0, runId: "testrun-reasoning", recursionDepth: 0 },
+    );
+
+    expect(result.exitCode).toBe(0);
+    const capturedArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
+    const thinkingIdx = capturedArgs.indexOf("--thinking");
+    expect(thinkingIdx).toBeGreaterThanOrEqual(0);
+    expect(capturedArgs[thinkingIdx + 1]).toBe("xhigh");
+    expect(result.launchCommand).toContain("--thinking xhigh");
+  });
+
+  test("should not pass --thinking when the type sets no reasoning level", async () => {
+    const tempDir = makeTempDir("collab-subagent-no-reasoning");
+    const { argsFile } = writeFakePiBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "scout",
+      description: "Scout",
+      model: "github-copilot/gemini-3.7-flash",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/scout.toml",
+      tools: ["read"],
+    };
+
+    const result = await runSpawnTask(
+      tempDir,
+      { agent: "scout", task: "Find things" },
+      agentDef,
+      { index: 0, runId: "testrun-no-reasoning", recursionDepth: 0 },
+    );
+
+    expect(result.exitCode).toBe(0);
+    const capturedArgs = JSON.parse(fs.readFileSync(argsFile, "utf-8")) as string[];
+    expect(capturedArgs).not.toContain("--thinking");
+  });
+
   test("should split only the first slash so provider-prefixed model ids keep the rest as model id", async () => {
     const tempDir = makeTempDir("collab-subagent-model-nested");
     const { argsFile } = writeFakePiBinary(tempDir);

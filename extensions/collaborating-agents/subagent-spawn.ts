@@ -20,6 +20,8 @@ export interface SpawnAgentDefinition {
   name: string;
   description: string;
   model?: string;
+  /** Thinking level from the type config; forwarded to the child as --thinking. */
+  reasoning?: "low" | "medium" | "high" | "xhigh";
   tools?: string[];
   systemPrompt: string;
   source: "bundled" | "user" | "project";
@@ -1685,6 +1687,11 @@ export async function runSpawnTask(
     if (modelSpec.provider) commonArgs.push("--provider", modelSpec.provider);
     commonArgs.push("--model", modelSpec.modelId);
   }
+  // Without this the type's `reasoning` is parsed and displayed but every
+  // child runs at its profile's defaultThinkingLevel.
+  if (agentDef.reasoning) {
+    commonArgs.push("--thinking", agentDef.reasoning);
+  }
 
   const requestedTools = [...new Set((agentDef.tools ?? []).map((tool) => tool.trim()).filter(Boolean))];
 
@@ -2061,6 +2068,7 @@ export function createSpawnAgentDefinitionFromType(
     name: typeConfig.name,
     description: typeConfig.description,
     model: typeConfig.model,
+    reasoning: typeConfig.reasoning,
     // A type may widen or narrow the tool set; without one it gets the default
     // five, which is what every type got before types could ask.
     tools: typeConfig.tools?.length ? [...typeConfig.tools] : [...DEFAULT_SUBAGENT_TOOLS],
