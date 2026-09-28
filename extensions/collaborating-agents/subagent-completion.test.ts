@@ -319,3 +319,41 @@ describe("a parked subagent in the completion payload", () => {
     expect(payload.content).not.toContain("waiting on your answer");
   });
 });
+
+describe("parked questions the parent already knows about", () => {
+  const parked = () => makeSpawnResult({ name: "Verify-e247-YoungOcean", output: "", awaitingReply: "Q1: real save or aborted request?" });
+  const result = () => ({ content: [{ type: "text" as const, text: "" }], details: { result: parked(), childRunIds: ["e2479ac5-0"] } });
+
+  test("an answered question produces no wake at all, hidden or visible", () => {
+    const answered = () => "answered" as const;
+    expect(buildSubagentCompletionMessagePayload(result(), { hiddenWake: true, questionState: answered })).toBeNull();
+    expect(buildSubagentCompletionMessagePayload(result(), { hiddenWake: false, questionState: answered })).toBeNull();
+  });
+
+  test("a question already read as a direct message is marked as such, once", () => {
+    const delivered = (runId: string | undefined, q: string) => (runId === "e2479ac5-0" && q.startsWith("Q1") ? ("delivered" as const) : undefined);
+    const hidden = buildSubagentCompletionMessagePayload(result(), { hiddenWake: true, questionState: delivered });
+    expect(hidden?.content).toContain("already reached you as a direct message");
+    expect(hidden?.content).toContain('action: "reply"');
+    const visible = buildSubagentCompletionMessagePayload(result(), { hiddenWake: false, questionState: delivered });
+    expect(visible?.content).toContain("already reached you as a direct message");
+    expect((visible?.content.match(/already reached you/g) ?? []).length).toBe(1);
+  });
+
+  test("an unknown question is delivered as before", () => {
+    const payload = buildSubagentCompletionMessagePayload(result(), { hiddenWake: true, questionState: () => undefined });
+    expect(payload?.content).toContain("asks: Q1");
+    expect(payload?.content).not.toContain("already reached you");
+  });
+
+  test("a batch keeps the other children's results when one question was answered", () => {
+    const done = makeSpawnResult({ name: "Worker-1111-BlueLake", output: "diff ready" });
+    const payload = buildSubagentCompletionMessagePayload(
+      { content: [{ type: "text", text: "" }], details: { results: [parked(), done], childRunIds: ["e2479ac5-0", "b1b1b1b1-0"] } },
+      { hiddenWake: false, questionState: (runId) => (runId === "e2479ac5-0" ? "answered" : undefined) },
+    );
+    expect(payload?.content).toContain("BlueLake");
+    expect(payload?.content).not.toContain("Q1");
+    expect(payload?.content).toContain("Received final results from BlueLake.");
+  });
+});

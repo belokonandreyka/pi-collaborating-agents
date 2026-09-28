@@ -82,6 +82,11 @@ export interface ExtensionState {
   hasSpawnedSubagents: boolean;
   completedSubagents: AgentRegistration[];
   activeSubagentRuns: number;
+  /**
+   * Questions a child already delivered as a direct message, by sender name:
+   * the completion wake for the same parked question must not read as a new one.
+   */
+  deliveredQuestions: Map<string, { text: string; at: number }>;
 }
 
 export type SubagentLaunchMode = "process" | "herdr-pane";

@@ -80,12 +80,44 @@ function inspectionHintLines(runId: string | undefined): string[] {
   ];
 }
 
+/**
+ * What the parent already knows about a parked child's question when the
+ * completion wake is built: `answered` — a reply was delivered after the child
+ * parked (the wake would re-ask a settled question); `delivered` — the same text
+ * already reached the parent as a direct message (the wake is a duplicate, kept
+ * only as the reminder to reply once). Seen 2026-09-28: the child sent its
+ * question over the bus, the parent replied within 9 s, and the completion wake
+ * for the park arrived 2 s after the reply, so the parent spent a turn deciding
+ * whether its reply had registered.
+ */
+export type QuestionState = "answered" | "delivered" | undefined;
+
+export function normalizeQuestionText(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 400);
+}
+
 export function buildSubagentCompletionMessagePayload(
   result: SubagentCompletionToolResult,
-  options?: { hiddenWake?: boolean },
-): SubagentCompletionMessagePayload {
-  const spawnResults = collectSpawnResults(result.details);
-  const childRunIds = collectChildRunIds(result.details);
+  options?: { hiddenWake?: boolean; questionState?: (runId: string | undefined, question: string) => QuestionState },
+): SubagentCompletionMessagePayload | null {
+  const allSpawnResults = collectSpawnResults(result.details);
+  const allChildRunIds = collectChildRunIds(result.details);
+  const stateOf = (index: number): QuestionState => {
+    const question = allSpawnResults[index]?.awaitingReply;
+    return question ? options?.questionState?.(allChildRunIds[index], question) : undefined;
+  };
+  // A parked question the parent has already answered is not news: drop it, and
+  // when nothing else happened in this batch, send no wake at all.
+  const keep = allSpawnResults.map((_, index) => stateOf(index) !== "answered");
+  if (!keep.some(Boolean) && allSpawnResults.length > 0) return null;
+  const spawnResults = allSpawnResults.filter((_, index) => keep[index]);
+  const childRunIds = allChildRunIds.length === allSpawnResults.length
+    ? allChildRunIds.filter((_, index) => keep[index])
+    : allChildRunIds;
+  const deliveredNote = (index: number): string | undefined =>
+    stateOf(allSpawnResults.indexOf(spawnResults[index])) === "delivered"
+      ? "(the same question already reached you as a direct message; answer it once with reply)"
+      : undefined;
 
   if (options?.hiddenWake) {
     const runLabel = childRunIds.length === 1 ? "Run ID" : "Run IDs";
@@ -119,15 +151,17 @@ export function buildSubagentCompletionMessagePayload(
     // reading a question out of a transcript and concluding the run had failed,
     // which is exactly what makes it re-spawn instead of answering.
     const awaiting = spawnResults
-      .map((spawnResult, index) => ({ spawnResult, runId: childRunIds[index] }))
+      .map((spawnResult, index) => ({ spawnResult, runId: childRunIds[index], note: deliveredNote(index) }))
       .filter(({ spawnResult }) => Boolean(spawnResult.awaitingReply))
-      .map(({ spawnResult, runId }) => ({
+      .map(({ spawnResult, runId, note }) => ({
         runId,
         name: formatAgentDisplayName(spawnResult.name),
         question: spawnResult.awaitingReply!,
+        ...(note ? { note } : {}),
       }));
-    const awaitingLines = awaiting.flatMap(({ name, runId, question }) => [
+    const awaitingLines = awaiting.flatMap(({ name, runId, question, note }) => [
       `- ${name}${runId ? ` (${runId})` : ""} asks: ${question}`,
+      ...(note ? [`  ${note}`] : []),
       ...(runId ? [`  agent_message({ action: "reply", runId: "${runId}", message: "..." })`] : []),
     ]);
 
@@ -183,6 +217,7 @@ export function buildSubagentCompletionMessagePayload(
         paneNote ? `- ${paneNote}` : undefined,
         "",
         output,
+        r.awaitingReply ? deliveredNote(index) : undefined,
         r.awaitingReply && runId
           ? `Answer it instead of re-spawning:\n- agent_message({ action: "reply", runId: "${runId}", message: "..." })`
           : undefined,
@@ -215,6 +250,7 @@ export function buildSubagentCompletionMessagePayload(
     body = [
       paneNote ? `- ${paneNote}` : undefined,
       (singleResult?.output || result.content[0]?.text || "(no output)").trim() || "(no output)",
+      singleResult?.awaitingReply ? deliveredNote(0) : undefined,
       singleResult?.awaitingReply && runId
         ? `Answer it instead of re-spawning:\n- agent_message({ action: "reply", runId: "${runId}", message: "..." })`
         : undefined,

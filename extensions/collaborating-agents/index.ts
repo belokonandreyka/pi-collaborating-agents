@@ -61,6 +61,7 @@ import {
 } from "./subagent-spawn.js";
 import {
   buildSubagentCompletionMessagePayload,
+  normalizeQuestionText,
   collectSpawnResults,
   partitionPendingSubagentCompletionUpdates,
   shouldDeferSubagentCompletionUpdate,
@@ -902,6 +903,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     hasSpawnedSubagents: false,
     completedSubagents: [],
     activeSubagentRuns: 0,
+    deliveredQuestions: new Map(),
   };
 
   let config: CollaboratingAgentsConfig = loadConfig(process.cwd());
@@ -1098,7 +1100,22 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     };
 
     const deliverAs = msg.urgent ? "steer" : "followUp";
+    if (msg.kind !== "broadcast") state.deliveredQuestions.set(msg.from, { text: normalizeQuestionText(msg.text), at: Date.now() });
     pi.sendMessage(custom, { triggerTurn: true, deliverAs });
+  }
+
+  /**
+   * A parked child's question, as the completion wake is about to repeat it: was it
+   * already answered (reply delivered after the park cleared `awaitingReply`), or
+   * already read as a direct message from the same child in the last ten minutes?
+   */
+  function questionStateForWake(runId: string | undefined, question: string): "answered" | "delivered" | undefined {
+    if (!runId) return undefined;
+    const record = listSubagentRunRecords(dirs).find((r) => r.recordId === runId);
+    if (record && record.status === "running" && !record.awaitingReply) return "answered";
+    const delivered = record?.name ? state.deliveredQuestions.get(record.name) : undefined;
+    if (delivered && Date.now() - delivered.at < 10 * 60_000 && delivered.text === normalizeQuestionText(question)) return "delivered";
+    return undefined;
   }
 
   function processInboxNow(): void {
@@ -2286,16 +2303,17 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     ctx: ExtensionContext,
     options?: { targetSessionFile?: string },
   ): void {
-    sendSubagentStatusPayload(
-      buildSubagentCompletionMessagePayload(result, {
-        hiddenWake: config.subagentCompletionDisplay === "hidden",
-      }),
-      ctx,
-      {
-        ...options,
-        triggerTurn: config.triggerTurnOnSubagentCompletion,
-      },
-    );
+    const payload = buildSubagentCompletionMessagePayload(result, {
+      hiddenWake: config.subagentCompletionDisplay === "hidden",
+      questionState: questionStateForWake,
+    });
+    // null: the only thing this batch had to say was a question the parent has
+    // already answered — a wake would make it doubt its own reply.
+    if (!payload) return;
+    sendSubagentStatusPayload(payload, ctx, {
+      ...options,
+      triggerTurn: config.triggerTurnOnSubagentCompletion,
+    });
   }
 
   function sendSubagentFailureUpdate(
