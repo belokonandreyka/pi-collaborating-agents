@@ -9,6 +9,14 @@ export interface ClassifyInput {
 
 const AUTH_STATUS_CODES = new Set([401, 403]);
 
+// A provider that cannot serve the model right now, as opposed to one that
+// refuses it: Bedrock answers `503 ServiceUnavailableException: Bedrock is
+// unable to process your request` after 60–120 s when a model is short of
+// capacity (Opus 5.5, 2026-09-28: every request for half an hour, then none),
+// Anthropic answers 529 overloaded. pi's own retries run first; when they are
+// exhausted the next chain entry is the only way the turn completes.
+const CAPACITY_STATUS_CODES = new Set([503, 529]);
+
 const CONTEXT_OVERFLOW_PATTERNS = [
   /context (window|length)/i,
   /too many tokens/i,
@@ -37,6 +45,10 @@ const ELIGIBLE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /model_not_supported/i, label: "model_not_supported" },
   { pattern: /requested model .* not supported/i, label: "model_not_supported" },
   { pattern: /model .* is not supported/i, label: "model_not_supported" },
+  { pattern: /unable to process your request/i, label: "capacity" },
+  { pattern: /ServiceUnavailableException/i, label: "capacity" },
+  { pattern: /service unavailable/i, label: "capacity" },
+  { pattern: /\boverloaded\b/i, label: "capacity" },
 ];
 
 export function classifyError(input: ClassifyInput): FallbackClassification {
@@ -58,6 +70,9 @@ export function classifyError(input: ClassifyInput): FallbackClassification {
 
   if (status === 429) {
     return { eligible: true, reason: "http_429" };
+  }
+  if (status !== undefined && CAPACITY_STATUS_CODES.has(status)) {
+    return { eligible: true, reason: `capacity_${status}` };
   }
 
   if (text) {

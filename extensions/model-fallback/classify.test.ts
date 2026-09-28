@@ -64,4 +64,15 @@ describe("classifyError", () => {
   test("should NOT fall back when there is no status or error text", () => {
     expect(classifyError({}).eligible).toBe(false);
   });
+
+  test("provider capacity failures switch: Bedrock 503 and Anthropic 529", () => {
+    expect(classifyError({ status: 503, errorMessage: '{"type":"error","error":{"type":"ServiceUnavailableException","message":"Bedrock is unable to process your request."}}' }))
+      .toEqual({ eligible: true, reason: "capacity_503" });
+    expect(classifyError({ status: 529, errorMessage: "overloaded_error: Overloaded" })).toEqual({ eligible: true, reason: "capacity_529" });
+    expect(classifyError({ errorMessage: "Bedrock is unable to process your request." })).toEqual({ eligible: true, reason: "capacity" });
+    // a plain 500 with no hint still stays put
+    expect(classifyError({ status: 500, errorMessage: "internal error" })).toEqual({ eligible: false, reason: "http_500" });
+    // auth wins over status
+    expect(classifyError({ status: 503, errorMessage: "forbidden" })).toEqual({ eligible: false, reason: "auth_error" });
+  });
 });

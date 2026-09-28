@@ -28,7 +28,7 @@ Explicitly **not** eligible (bail out, keep current model):
 - Auth / 401 / 403
 - Generic model-not-found / invalid-request errors other than
   `model_not_supported`
-- Generic 5xx without a quota hint
+- Generic 5xx without a quota or capacity hint (503 / 529, "unable to process your request", "overloaded", "service unavailable" do switch: the provider cannot serve the model right now, and pi's own retries have already run)
 
 ## Runtime requirement
 
