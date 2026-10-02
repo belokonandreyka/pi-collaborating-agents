@@ -1243,6 +1243,17 @@ export async function waitForSettledSessionResult(args: {
    */
   minUserMessages?: number;
   onUpdate?: (state: { sessionId?: string; progress?: SubagentProgress }) => void;
+  /**
+   * Whether the child's pane still exists. Asked only when the inactivity budget
+   * runs out while the child is mid-turn (no final text, no error, no exit marker):
+   * a tool call such as a 15-minute test run, or a model request the provider is
+   * slow to answer, writes nothing to the transcript until it returns. A live pane
+   * in that state is busy, not dead, so the budget is renewed up to the hard cap.
+   * Without it the old rule holds: 10 minutes of silence fail the run while the
+   * child keeps working, and its real report is never delivered (2026-10-01:
+   * three Karma/Vitest runs failed this way).
+   */
+  isAlive?: () => Promise<boolean>;
 }): Promise<{
   sessionId?: string;
   terminalAssistantText?: string;
@@ -1273,7 +1284,16 @@ export async function waitForSettledSessionResult(args: {
   let pendingQuestion: string | undefined;
   let lastReportedToolCount = 0;
 
-  while (Date.now() - startedAt < hardTimeoutMs && Date.now() < activityDeadlineAt) {
+  while (Date.now() - startedAt < hardTimeoutMs) {
+    if (Date.now() >= activityDeadlineAt) {
+      const midTurn =
+        terminalAssistantText === undefined &&
+        terminalError === undefined &&
+        pendingQuestion === undefined &&
+        readExitMarkerCode(args.exitMarkerPath) === null;
+      if (!midTurn || !args.isAlive || !(await args.isAlive().catch(() => false))) break;
+      activityDeadlineAt = Date.now() + inactivityTimeoutMs;
+    }
     const currentToken = readFileChangeToken(args.sessionFile);
     if (didFileChange(currentToken, lastObservedToken)) {
       lastObservedToken = currentToken;
@@ -1547,6 +1567,12 @@ async function closeSubagentPane(
  * Best-effort terminal capture used only to enrich failure messages, so both
  * backends degrade to an empty string rather than surfacing their own errors.
  */
+async function herdrPaneExists(paneRef: string | undefined): Promise<boolean> {
+  if (!paneRef) return false;
+  const listed = await herdrListPanes();
+  return listed.ok && listed.value.some((pane) => pane.paneId === paneRef);
+}
+
 async function readSubagentPaneScreen(
   refs: { paneRef?: string; surfaceRef?: string },
   lines: number,
@@ -1628,6 +1654,7 @@ export async function startReplyToSubagent(
       exitMarkerPath,
       timeoutMs: args.timeoutMs ?? PANE_RESULT_TIMEOUT_MS,
       parentAgentName: args.parentAgentName,
+      isAlive: () => herdrPaneExists(paneRef),
       minUserMessages,
       onUpdate: (state) => {
         if (state.progress) args.onProgress?.(state.progress);
@@ -1931,6 +1958,7 @@ export async function runSpawnTask(
       exitMarkerPath: exitMarkerPath!,
       timeoutMs: paneResultTimeoutMs,
       parentAgentName: options.parentAgentName,
+      isAlive: () => herdrPaneExists(result.paneRef ?? result.surfaceRef),
       onUpdate: (state) => {
         if (state.sessionId) {
           result.sessionId = state.sessionId;

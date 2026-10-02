@@ -3099,3 +3099,79 @@ describe("subagent spawn model provider selection", () => {
     expect(capturedPiArgs).not.toContain("--models");
   }, 10000);
 });
+
+describe("a child silent inside a long tool call", () => {
+  const line = (message: unknown) => JSON.stringify({ type: "message", id: `m-${Math.random().toString(36).slice(2, 8)}`, message });
+  const task = line({ role: "user", content: [{ type: "text", text: "run the full test suite" }] });
+  const longCall = line({ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "t-1", name: "bash", arguments: { command: "npm run test-ci" } }] });
+  const result = line({ role: "toolResult", toolCallId: "t-1", toolName: "bash", content: [{ type: "text", text: "1913 passed" }] });
+  const report = line({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Batch done: 1913 passed." }] });
+
+  function writeBusySession(dir: string): string {
+    const sessionFile = path.join(dir, "session.jsonl");
+    fs.writeFileSync(sessionFile, [JSON.stringify({ type: "session", id: "s-busy" }), task, longCall].join("\n") + "\n", "utf-8");
+    return sessionFile;
+  }
+
+  test("without a liveness check the old inactivity budget still fails it", async () => {
+    const tempDir = makeTempDir("collab-busy-nocheck");
+    const sessionFile = writeBusySession(tempDir);
+    const settled = await waitForSettledSessionResult({ sessionFile, exitMarkerPath: path.join(tempDir, "missing.exit"), timeoutMs: 300, idleGraceMs: 100 });
+    expect(settled.timedOut).toBe(true);
+  });
+
+  test("a live pane keeps the run open past the budget and its late report is the result", async () => {
+    const tempDir = makeTempDir("collab-busy-alive");
+    const sessionFile = writeBusySession(tempDir);
+    let asked = 0;
+    // the tool returns well after the 300 ms inactivity budget
+    setTimeout(() => fs.appendFileSync(sessionFile, [result, report].join("\n") + "\n", "utf-8"), 900);
+    const settled = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 300,
+      idleGraceMs: 100,
+      isAlive: async () => {
+        asked += 1;
+        return true;
+      },
+    });
+    expect(settled.timedOut).toBe(false);
+    expect(settled.terminalAssistantText).toBe("Batch done: 1913 passed.");
+    expect(asked).toBeGreaterThan(0);
+  });
+
+  test("a pane that is gone still times out at the budget", async () => {
+    const tempDir = makeTempDir("collab-busy-dead");
+    const sessionFile = writeBusySession(tempDir);
+    const started = Date.now();
+    const settled = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 300,
+      idleGraceMs: 100,
+      isAlive: async () => false,
+    });
+    expect(settled.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  test("a finished child is not kept waiting by the liveness check", async () => {
+    const tempDir = makeTempDir("collab-busy-done");
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    fs.writeFileSync(sessionFile, [JSON.stringify({ type: "session", id: "s-done" }), task, longCall, result, report].join("\n") + "\n", "utf-8");
+    let asked = 0;
+    const settled = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 300,
+      idleGraceMs: 100,
+      isAlive: async () => {
+        asked += 1;
+        return true;
+      },
+    });
+    expect(settled.terminalAssistantText).toBe("Batch done: 1913 passed.");
+    expect(asked).toBe(0);
+  });
+});
