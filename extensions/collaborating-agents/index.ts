@@ -995,23 +995,24 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     const peers = activePeers.length;
     const unread = Array.from(state.unreadCounts.values()).reduce((n, v) => n + v, 0);
 
+    // Local focus is the default, so only a redirected focus is shown.
     const focusText =
       state.focus.mode === "local"
-        ? ctx.ui.theme.fg("dim", "local")
-        : ctx.ui.theme.fg(
+        ? ""
+        : ` ${ctx.ui.theme.fg("dim", "focus:")} ${ctx.ui.theme.fg(
             "warning",
             withRoleLabel(
               state.focus.targetAgent,
               activePeers.find((peer) => peer.name === state.focus.targetAgent)?.role,
             ),
-          );
+          )}`;
 
     const unreadText = unread > 0 ? ctx.ui.theme.fg("accent", ` ●${unread}`) : "";
     const reservationText =
       state.reservations.length > 0 ? ctx.ui.theme.fg("warning", ` 🔒${state.reservations.length}`) : "";
 
     const selfLabel = withRoleLabel(state.agentName, getCurrentAgentRole());
-    const label = `${ctx.ui.theme.fg("accent", selfLabel)} ${ctx.ui.theme.fg("dim", `(${peers} peers)`)} ${ctx.ui.theme.fg("dim", "focus:")} ${focusText}${reservationText}${unreadText}`;
+    const label = `${ctx.ui.theme.fg("accent", selfLabel)} ${ctx.ui.theme.fg("dim", `(${peers} peers)`)}${focusText}${reservationText}${unreadText}`;
     ctx.ui.setStatus(STATUS_KEY, label);
   }
 
