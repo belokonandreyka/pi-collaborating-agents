@@ -243,7 +243,7 @@ subagent({
 })
 ```
 
-Launch responses and background launch notices include a Batch ID plus one child Run ID per spawned subagent. Prefer those Run IDs for `agent_message({ action: "session", runId: "..." })` and `agent_message({ action: "tail", runId: "..." })`; use `agent_message({ action: "sessions" })` to rediscover active and recent completed runs, or `includeCompleted: false` for active runs only.
+Launch responses and background launch notices include a Batch ID plus one child Run ID per spawned subagent; the launch response pairs each Run ID with the child's callsign (`Subagent: BrightMeadow (Run ID: …)`), the name the user sees in panes and on the status line, so the coordinator can refer to the child by name. Prefer those Run IDs for `agent_message({ action: "session", runId: "..." })` and `agent_message({ action: "tail", runId: "..." })`; use `agent_message({ action: "sessions" })` to rediscover active and recent completed runs, or `includeCompleted: false` for active runs only.
 
 ## Subagent Type Configuration
 

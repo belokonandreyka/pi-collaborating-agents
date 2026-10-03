@@ -51,6 +51,7 @@ import {
   createSpawnAgentDefinitionFromType,
   mapWithConcurrencyLimit,
   PROCESS_MODE_SESSION_FILE_UNAVAILABLE_REASON,
+  reserveReadableCallsign,
   runSpawnTask,
   startReplyToSubagent,
   type SpawnAgentDefinition,
@@ -2434,11 +2435,15 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
       mode === "single"
         ? "Subagent launched in background."
         : `${taskCount} subagents launched in background.`;
-    const runLabel = mode === "single" ? `Run ID: ${childRunIds[0]}` : `Run IDs: ${childRunIds.join(", ")}`;
+    // The callsign is what the user sees in panes and on the status line, so
+    // the launch result gives it next to the Run ID before the child spawns.
+    const named = childRunIds.map((runId, index) => `${reserveReadableCallsign(batchRunId, index)} (Run ID: ${runId})`);
+    const runLabel = mode === "single" ? `Subagent: ${named[0]}` : `Subagents: ${named.join(", ")}`;
     return [
       label,
       `Batch ID: ${batchRunId}`,
       runLabel,
+      "Call a subagent by its name when reporting to the user; the Run ID is for tool calls.",
       'Use agent_message({ action: "sessions" }) or agent_message({ action: "tail", to: "latest" }) to inspect progress.',
       "Do not wait for direct subagent messages; final outputs are auto-collected and posted on completion.",
     ].join("\n");

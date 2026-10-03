@@ -599,7 +599,7 @@ const CALLSIGN_SECOND_WORDS = [
   "Willow",
 ] as const;
 
-const usedCallsignsByRun = new Map<string, Set<string>>();
+const callsignsByRun = new Map<string, Map<number, string>>();
 
 function toTitleCase(word: string): string {
   return word.length === 0 ? word : `${word[0]!.toUpperCase()}${word.slice(1)}`;
@@ -623,28 +623,34 @@ function generateCallsignCandidate(runId: string, index: number, nonce: number):
   return `${toTitleCase(first)}${second}`;
 }
 
-function reserveReadableCallsign(runId: string, index: number): string {
-  let used = usedCallsignsByRun.get(runId);
-  if (!used) {
-    used = new Set<string>();
-    usedCallsignsByRun.set(runId, used);
-    if (usedCallsignsByRun.size > 256) {
-      const firstKey = usedCallsignsByRun.keys().next().value;
-      if (typeof firstKey === "string") usedCallsignsByRun.delete(firstKey);
+/**
+ * The child's callsign for (batch run, index). Idempotent, so the launch result
+ * can name the children before they spawn and the spawner gets the same names.
+ */
+export function reserveReadableCallsign(runId: string, index: number): string {
+  let byIndex = callsignsByRun.get(runId);
+  if (!byIndex) {
+    byIndex = new Map<number, string>();
+    callsignsByRun.set(runId, byIndex);
+    if (callsignsByRun.size > 256) {
+      const firstKey = callsignsByRun.keys().next().value;
+      if (typeof firstKey === "string") callsignsByRun.delete(firstKey);
     }
   }
+  const reserved = byIndex.get(index);
+  if (reserved) return reserved;
 
+  const used = new Set(byIndex.values());
+  let callsign = generateCallsignCandidate(runId, index, 0);
   for (let nonce = 0; nonce < 128; nonce++) {
-    const callsign = generateCallsignCandidate(runId, index, nonce);
-    if (!used.has(callsign)) {
-      used.add(callsign);
-      return callsign;
+    const candidate = generateCallsignCandidate(runId, index, nonce);
+    if (!used.has(candidate)) {
+      callsign = candidate;
+      break;
     }
   }
-
-  const fallback = generateCallsignCandidate(runId, index, 0);
-  used.add(fallback);
-  return fallback;
+  byIndex.set(index, callsign);
+  return callsign;
 }
 
 function sanitizeAgentName(name: string): string {

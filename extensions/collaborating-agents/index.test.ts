@@ -1355,6 +1355,10 @@ describe("subagent launch identity", () => {
     expect(String(launchMessage.content)).toContain(`Run ID: ${recordId}`);
     expect(String(launchMessage.content)).toContain("Runtime subagent name:");
     expect(String(launchMessage.content)).toContain("Display name:");
+    // The launch result names the child before it spawns; the spawned child carries that name.
+    const displayName = String(launchMessage.content).match(/Display name: (\S+)/)?.[1];
+    expect(displayName).toMatch(/^[A-Z][a-z]+[A-Z][a-z]+$/);
+    expect(result.content[0]?.text).toContain(`Subagent: ${displayName} (Run ID: ${recordId})`);
     expect(String(launchMessage.content)).toContain("Session ID:");
     expect(String(launchMessage.content)).toContain("Session file:");
     expect(String(launchMessage.content)).toContain(`agent_message({ action: "session", runId: "${recordId}" })`);
@@ -1460,7 +1464,7 @@ describe("subagent launch identity", () => {
     );
 
     expect(result.content[0]?.text).toContain("Batch ID:");
-    expect(result.content[0]?.text).toContain("Run IDs:");
+    expect(result.content[0]?.text).toMatch(/Subagents: [A-Z][a-z]+[A-Z][a-z]+ \(Run ID: \S+-0\), [A-Z][a-z]+[A-Z][a-z]+ \(Run ID: \S+-1\)/);
     expect(result.details).toMatchObject({
       mode: "subagent",
       queued: true,
