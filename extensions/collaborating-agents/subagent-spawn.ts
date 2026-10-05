@@ -11,6 +11,7 @@ import {
   herdrCallerPaneFromEnv,
   herdrCreateTab,
   herdrClosePane,
+  herdrFocusNeighbor,
   herdrListPanes,
   herdrReadPane,
   herdrRedockPane,
@@ -1467,11 +1468,13 @@ async function redockStripsUnderOrchestrator(args: {
   orchestratorHeight: number;
   workspaceId: string;
   tabId: string;
+  focusedPaneId?: string;
   strips: HerdrPaneRect[];
 }): Promise<void> {
+  let lastDocked: string | undefined;
   for (const strip of args.strips) {
     // Best effort: a strip that cannot move stays where it was.
-    await herdrRedockPane({
+    const docked = await herdrRedockPane({
       paneId: strip.paneId,
       workspaceId: args.workspaceId,
       tabId: args.tabId,
@@ -1479,6 +1482,19 @@ async function redockStripsUnderOrchestrator(args: {
       split: "down",
       ratio: args.orchestratorHeight / (args.orchestratorHeight + strip.rect.height),
     });
+    if (docked.ok) lastDocked = docked.value.paneId;
+  }
+  if (!lastDocked) return;
+  // herdr resizes a moved pane's neighbours on screen but tells their
+  // terminals only on the next focus change: until then the new subagent
+  // draws for the old, shorter height (2026-10-05). One hop to the strip and
+  // back, ending where the focus was.
+  if (args.focusedPaneId === lastDocked) {
+    await herdrFocusNeighbor(lastDocked, "up");
+    await herdrFocusNeighbor(args.orchestratorPaneId, "down");
+  } else {
+    await herdrFocusNeighbor(args.orchestratorPaneId, "down");
+    await herdrFocusNeighbor(lastDocked, "up");
   }
 }
 
@@ -1546,6 +1562,7 @@ async function launchHerdrPane(args: {
     let strips: HerdrPaneRect[] = [];
     let orchestratorHeight = 0;
     let tabId = "";
+    let focusedPaneId: string | undefined;
     if (splitTarget.role === "orchestrator" && choosePaneSplitDirection(splitTarget) === "right") {
       const before = await herdrTabLayout(splitTarget.paneRef);
       const orchestrator = before.ok ? before.value.panes.find((p) => p.paneId === splitTarget.paneRef) : undefined;
@@ -1553,6 +1570,7 @@ async function launchHerdrPane(args: {
         strips = findStripsUnder(orchestrator, before.value.panes);
         orchestratorHeight = orchestrator.rect.height;
         tabId = before.value.tabId;
+        focusedPaneId = before.value.focusedPaneId;
       }
     }
     let split = await herdrSplitPane({
@@ -1598,6 +1616,7 @@ async function launchHerdrPane(args: {
         orchestratorHeight,
         workspaceId: caller.workspaceId,
         tabId,
+        focusedPaneId,
         strips,
       });
     }

@@ -262,7 +262,9 @@ function parseRect(value: unknown): HerdrRect | null {
 }
 
 /** The pane rectangles of the tab that holds `paneId`, in terminal cells. */
-export async function herdrTabLayout(paneId: string): Promise<HerdrResult<{ tabId: string; panes: HerdrPaneRect[] }>> {
+export async function herdrTabLayout(
+  paneId: string,
+): Promise<HerdrResult<{ tabId: string; focusedPaneId?: string; panes: HerdrPaneRect[] }>> {
   const envelope = parseHerdrEnvelope(await runHerdrCommand(["pane", "layout", "--pane", paneId]));
   if (!envelope.ok) return envelope;
   const layout = envelope.value.layout as Record<string, unknown> | undefined;
@@ -274,7 +276,13 @@ export async function herdrTabLayout(paneId: string): Promise<HerdrResult<{ tabI
     const rect = parseRect((raw as Record<string, unknown>)?.rect);
     if (typeof id === "string" && rect) panes.push({ paneId: id, rect });
   }
-  return { ok: true, value: { tabId, panes } };
+  const focusedPaneId = typeof layout.focused_pane_id === "string" ? layout.focused_pane_id : undefined;
+  return { ok: true, value: { tabId, focusedPaneId, panes } };
+}
+
+/** Moves focus from `paneId` to its neighbour in `direction`. */
+export async function herdrFocusNeighbor(paneId: string, direction: "left" | "right" | "up" | "down"): Promise<HerdrResult<true>> {
+  return parseHerdrAck(await runHerdrCommand(["pane", "focus", "--pane", paneId, "--direction", direction]));
 }
 
 /**

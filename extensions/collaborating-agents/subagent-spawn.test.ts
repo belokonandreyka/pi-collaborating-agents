@@ -1841,7 +1841,13 @@ describe("subagent spawn", () => {
       delete process.env.TEST_HERDR_LAYOUT;
     }
 
-    const moves = getCapturedHerdrArgs(herdrArgsFile).filter((entry) => entry[1] === "move");
+    const captured = getCapturedHerdrArgs(herdrArgsFile);
+    // A focus hop to the strip and back makes herdr resize the new subagent's terminal.
+    expect(captured.filter((entry) => entry[1] === "focus")).toEqual([
+      ["pane", "focus", "--pane", "w1:p1", "--direction", "down"],
+      ["pane", "focus", "--pane", "w1:p7", "--direction", "up"],
+    ]);
+    const moves = captured.filter((entry) => entry[1] === "move");
     expect(moves).toEqual([
       ["pane", "move", "w1:p7", "--new-tab", "--workspace", "w1", "--no-focus"],
       ["pane", "move", "w1:p7", "--tab", "w1:t1", "--split", "down", "--target-pane", "w1:p1", "--ratio", (57 / 70).toFixed(3), "--no-focus"],
@@ -2499,6 +2505,10 @@ if (command === "read") {
 if (command === "layout") {
   if (!process.env.TEST_HERDR_LAYOUT) fail("unsupported", "layout not faked");
   ok({ layout: { tab_id: "w1:t1", workspace_id: "w1", panes: JSON.parse(process.env.TEST_HERDR_LAYOUT) }, type: "pane_layout" });
+}
+
+if (command === "focus") {
+  silentOk();
 }
 
 if (command === "move") {
