@@ -10,6 +10,7 @@ import {
   resolvePaneEnvFile,
   resolveSubagentSessionsDir,
   mapWithConcurrencyLimit,
+  findStripsUnder,
   resetPaneLayoutStateForTests,
   resolveSpawnAgentDefinition,
   replyToSubagent,
@@ -1802,6 +1803,63 @@ describe("subagent spawn", () => {
     expect(splitDirections).toEqual(["right", "down", "down"]);
   });
 
+  test("a strip opened under the coordinator before any subagent is re-docked under it", async () => {
+    const tempDir = makeTempDir("collab-subagent-pane-strip");
+    const { argsFile } = writeFakePiBinary(tempDir);
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_ARGS_FILE = argsFile;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+    process.env.TEST_HERDR_SEND_ASYNC = "1";
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w1:p1";
+    process.env.TEST_HERDR_LAYOUT = JSON.stringify([
+      { pane_id: "w1:p1", rect: { x: 0, y: 0, width: 283, height: 57 } },
+      { pane_id: "w1:p7", rect: { x: 0, y: 57, width: 283, height: 13 } },
+    ]);
+
+    const agentDef: SpawnAgentDefinition = {
+      name: "worker",
+      description: "Worker",
+      systemPrompt: "Return concise findings.",
+      source: "bundled",
+      filePath: "/tmp/worker.toml",
+      tools: ["read", "bash"],
+    };
+
+    try {
+      const result = await runSpawnTask(tempDir, { agent: "worker", task: "Inspect" }, agentDef, {
+        index: 0,
+        runId: "testrun-strip",
+        recursionDepth: 0,
+        launchMode: "herdr-pane",
+        closeCompletedPane: false,
+      });
+      expect(result.exitCode).toBe(0);
+    } finally {
+      delete process.env.TEST_HERDR_LAYOUT;
+    }
+
+    const moves = getCapturedHerdrArgs(herdrArgsFile).filter((entry) => entry[1] === "move");
+    expect(moves).toEqual([
+      ["pane", "move", "w1:p7", "--new-tab", "--workspace", "w1", "--no-focus"],
+      ["pane", "move", "w1:p7", "--tab", "w1:t1", "--split", "down", "--target-pane", "w1:p1", "--ratio", (57 / 70).toFixed(3), "--no-focus"],
+    ]);
+  });
+
+  test("findStripsUnder takes only panes below the coordinator that span its width", () => {
+    const orchestrator = { paneId: "o", rect: { x: 0, y: 0, width: 140, height: 50 } };
+    const panes = [
+      orchestrator,
+      { paneId: "strip", rect: { x: 0, y: 50, width: 283, height: 12 } },
+      { paneId: "own-strip", rect: { x: 0, y: 50, width: 140, height: 12 } },
+      { paneId: "right", rect: { x: 141, y: 0, width: 142, height: 62 } },
+      { paneId: "half-below", rect: { x: 70, y: 50, width: 213, height: 12 } },
+    ];
+    expect(findStripsUnder(orchestrator, panes).map((p) => p.paneId)).toEqual(["strip", "own-strip"]);
+  });
+
   test("preserves the orchestrator half while balancing sequential launches within the subagent subtree", async () => {
     const tempDir = makeTempDir("collab-subagent-pane-preserved-layout");
     const { argsFile } = writeFakePiBinary(tempDir);
@@ -2437,6 +2495,18 @@ if (command === "read") {
   process.exit(0);
 }
 
+// Layout and move are faked only when a test hands in the tab's rectangles.
+if (command === "layout") {
+  if (!process.env.TEST_HERDR_LAYOUT) fail("unsupported", "layout not faked");
+  ok({ layout: { tab_id: "w1:t1", workspace_id: "w1", panes: JSON.parse(process.env.TEST_HERDR_LAYOUT) }, type: "pane_layout" });
+}
+
+if (command === "move") {
+  const pane = paneInfo(args[2]);
+  if (args.indexOf("--new-tab") >= 0) pane.tab_id = "w1:t9";
+  ok({ move_result: { changed: true, pane: pane }, type: "pane_moved" });
+}
+
 fail("unsupported", "unknown pane command " + command);
 `;
 
@@ -2541,20 +2611,22 @@ describe("herdr pane launch mode", () => {
     const captured = getCapturedHerdrArgs(herdrArgsFile);
     expect(captured.map((entry) => `${entry[0]} ${entry[1]}`)).toEqual([
       "pane list",
+      // The first subagent splits the coordinator: its tab is read for strips to re-dock.
+      "pane layout",
       "pane split",
       "pane send-text",
       "pane send-keys",
       "pane close",
     ]);
 
-    const splitArgs = captured[1]!;
+    const splitArgs = captured[2]!;
     expect(splitArgs).toContain("--pane");
     expect(splitArgs).toContain("w1:p1");
     expect(splitArgs).toContain("--direction");
     expect(splitArgs).toContain("right");
     expect(splitArgs).toContain("--cwd");
 
-    const sendTextArgs = captured[2]!;
+    const sendTextArgs = captured[3]!;
     expect(sendTextArgs[2]).toBe("w1:p2");
     expect(sendTextArgs[3]).toContain("bash ");
     expect(sendTextArgs[3]).not.toContain("--mode json -p");
@@ -2563,7 +2635,7 @@ describe("herdr pane launch mode", () => {
     expect(capturedPiArgs).toContain("--session");
     expect(capturedPiArgs[capturedPiArgs.length - 1]).toBe("Inspect the repository");
 
-    expect(captured[4]!).toEqual(["pane", "close", "w1:p2"]);
+    expect(captured[5]!).toEqual(["pane", "close", "w1:p2"]);
   });
 
   test("refuses to launch when the orchestrator is not inside a herdr pane", async () => {

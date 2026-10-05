@@ -13,8 +13,11 @@ import {
   herdrClosePane,
   herdrListPanes,
   herdrReadPane,
+  herdrRedockPane,
   herdrSendLine,
   herdrSplitPane,
+  herdrTabLayout,
+  type HerdrPaneRect,
 } from "./herdr.js";
 
 export interface SpawnAgentDefinition {
@@ -1442,6 +1445,43 @@ async function snapshotHerdrWorkspace(workspaceId: string): Promise<Map<string, 
   return snapshot;
 }
 
+/**
+ * Panes the coordinator opened under its own pane before any subagent existed
+ * (a devserver strip): below it and at least as wide. When the first subagent
+ * splits the coordinator to the right, such a strip would keep the full width
+ * and cut the subagent column short, so it is re-docked under the coordinator.
+ */
+export function findStripsUnder(orchestrator: HerdrPaneRect, panes: HerdrPaneRect[]): HerdrPaneRect[] {
+  const o = orchestrator.rect;
+  return panes.filter(
+    ({ paneId, rect }) =>
+      paneId !== orchestrator.paneId &&
+      rect.y >= o.y + o.height &&
+      rect.x <= o.x &&
+      rect.x + rect.width >= o.x + o.width,
+  );
+}
+
+async function redockStripsUnderOrchestrator(args: {
+  orchestratorPaneId: string;
+  orchestratorHeight: number;
+  workspaceId: string;
+  tabId: string;
+  strips: HerdrPaneRect[];
+}): Promise<void> {
+  for (const strip of args.strips) {
+    // Best effort: a strip that cannot move stays where it was.
+    await herdrRedockPane({
+      paneId: strip.paneId,
+      workspaceId: args.workspaceId,
+      tabId: args.tabId,
+      targetPaneId: args.orchestratorPaneId,
+      split: "down",
+      ratio: args.orchestratorHeight / (args.orchestratorHeight + strip.rect.height),
+    });
+  }
+}
+
 async function launchHerdrPane(args: {
   scriptPath: string;
   preserveOrchestratorPane: boolean;
@@ -1503,6 +1543,18 @@ async function launchHerdrPane(args: {
     }
 
     let splitTarget = choosePaneSplitLeaf(layoutState, args.preserveOrchestratorPane);
+    let strips: HerdrPaneRect[] = [];
+    let orchestratorHeight = 0;
+    let tabId = "";
+    if (splitTarget.role === "orchestrator" && choosePaneSplitDirection(splitTarget) === "right") {
+      const before = await herdrTabLayout(splitTarget.paneRef);
+      const orchestrator = before.ok ? before.value.panes.find((p) => p.paneId === splitTarget.paneRef) : undefined;
+      if (before.ok && orchestrator) {
+        strips = findStripsUnder(orchestrator, before.value.panes);
+        orchestratorHeight = orchestrator.rect.height;
+        tabId = before.value.tabId;
+      }
+    }
     let split = await herdrSplitPane({
       paneId: splitTarget.paneRef,
       direction: choosePaneSplitDirection(splitTarget),
@@ -1538,6 +1590,16 @@ async function launchHerdrPane(args: {
       await herdrClosePane(created.paneId);
       removePaneFromLayout(caller.workspaceId, { paneRef: created.paneId, surfaceRef: created.paneId });
       return { ok: false, error: send.error };
+    }
+
+    if (strips.length > 0) {
+      await redockStripsUnderOrchestrator({
+        orchestratorPaneId: splitTarget.paneRef,
+        orchestratorHeight,
+        workspaceId: caller.workspaceId,
+        tabId,
+        strips,
+      });
     }
 
     return {

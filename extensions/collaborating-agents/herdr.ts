@@ -241,6 +241,77 @@ export async function herdrSplitPane(args: {
   return pane ? { ok: true, value: pane } : { ok: false, error: "herdr pane split returned no pane" };
 }
 
+export interface HerdrRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface HerdrPaneRect {
+  paneId: string;
+  rect: HerdrRect;
+}
+
+function parseRect(value: unknown): HerdrRect | null {
+  if (!value || typeof value !== "object") return null;
+  const r = value as Record<string, unknown>;
+  const nums = [r.x, r.y, r.width, r.height];
+  if (!nums.every((n) => typeof n === "number" && Number.isFinite(n))) return null;
+  return { x: r.x as number, y: r.y as number, width: r.width as number, height: r.height as number };
+}
+
+/** The pane rectangles of the tab that holds `paneId`, in terminal cells. */
+export async function herdrTabLayout(paneId: string): Promise<HerdrResult<{ tabId: string; panes: HerdrPaneRect[] }>> {
+  const envelope = parseHerdrEnvelope(await runHerdrCommand(["pane", "layout", "--pane", paneId]));
+  if (!envelope.ok) return envelope;
+  const layout = envelope.value.layout as Record<string, unknown> | undefined;
+  const tabId = typeof layout?.tab_id === "string" ? layout.tab_id : undefined;
+  if (!layout || !tabId || !Array.isArray(layout.panes)) return { ok: false, error: "herdr pane layout returned no layout" };
+  const panes: HerdrPaneRect[] = [];
+  for (const raw of layout.panes as unknown[]) {
+    const id = (raw as Record<string, unknown>)?.pane_id;
+    const rect = parseRect((raw as Record<string, unknown>)?.rect);
+    if (typeof id === "string" && rect) panes.push({ paneId: id, rect });
+  }
+  return { ok: true, value: { tabId, panes } };
+}
+
+/**
+ * Re-docks a pane as a split of `targetPaneId` in the same tab, keeping its
+ * process. herdr treats a move inside the pane's own tab as a no-op
+ * (`changed: false`), so the pane goes through a fresh unfocused tab first;
+ * that tab closes by itself once its only pane leaves.
+ */
+export async function herdrRedockPane(args: {
+  paneId: string;
+  workspaceId: string;
+  tabId: string;
+  targetPaneId: string;
+  split: HerdrSplitDirection;
+  ratio: number;
+}): Promise<HerdrResult<HerdrPane>> {
+  const out = parseHerdrEnvelope(
+    await runHerdrCommand(["pane", "move", args.paneId, "--new-tab", "--workspace", args.workspaceId, "--no-focus"]),
+  );
+  if (!out.ok) return out;
+  const parked = parseHerdrPane((out.value.move_result as Record<string, unknown> | undefined)?.pane);
+  if (!parked) return { ok: false, error: "herdr pane move returned no pane" };
+  const back = parseHerdrEnvelope(
+    await runHerdrCommand([
+      "pane", "move", parked.paneId,
+      "--tab", args.tabId,
+      "--split", args.split,
+      "--target-pane", args.targetPaneId,
+      "--ratio", args.ratio.toFixed(3),
+      "--no-focus",
+    ]),
+  );
+  if (!back.ok) return back;
+  const pane = parseHerdrPane((back.value.move_result as Record<string, unknown> | undefined)?.pane);
+  return pane ? { ok: true, value: pane } : { ok: false, error: "herdr pane move returned no pane" };
+}
+
 /**
  * Opens a new tab in the workspace and returns its root pane. The tab is not
  * focused: the orchestrator stays in front and the subagent is one tab away,
