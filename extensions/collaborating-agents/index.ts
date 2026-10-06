@@ -52,8 +52,10 @@ import {
   mapWithConcurrencyLimit,
   PROCESS_MODE_SESSION_FILE_UNAVAILABLE_REASON,
   reserveReadableCallsign,
+  adoptPaneSubagent,
   runSpawnTask,
   startReplyToSubagent,
+  type ReplyOutcome,
   type SpawnAgentDefinition,
   type SpawnResult,
   type SpawnSessionMetadata,
@@ -2516,6 +2518,144 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     return { batchRunId, childRunIds };
   }
 
+  /**
+   * Collect a pane child's next settled turn in the background, exactly like a
+   * fresh spawn: the record is closed, the coordinator is woken through the
+   * completion queue. Used after a reply (`kind: "reply"`) and when a resumed
+   * coordinator adopts a child its previous process launched (`kind: "adopt"`).
+   */
+  function collectResumedSubagentRun(
+    record: SubagentRunListRecord,
+    outcomePromise: Promise<ReplyOutcome>,
+    ctx: ExtensionContext,
+    kind: "reply" | "adopt",
+  ): void {
+    const launchSessionFile = ctx.sessionManager.getSessionFile() ?? coordinatorSessionFile ?? localSessionFile;
+    const label = record.displayName ?? record.name ?? record.recordId;
+    state.activeSubagentRuns += 1;
+    updateStatus(ctx);
+    void (async () => {
+      try {
+        const outcome = await outcomePromise;
+        const spawnResult: SpawnResult = {
+          agent: record.type,
+          name: record.name ?? record.recordId,
+          task: record.taskPreview,
+          exitCode: outcome.ok ? 0 : 1,
+          output: outcome.ok
+            ? (outcome.awaitingReply ? outcome.output?.trim() || outcome.awaitingReply : outcome.output?.trim() || "(no output)")
+            : outcome.error,
+          error: outcome.ok ? undefined : outcome.error,
+          launchMode: record.launchMode,
+          workingDirectory: record.cwd,
+          launchArgs: [],
+          launchCommand: "",
+          launchPrompt: "",
+          launchEnv: { PI_AGENT_NAME: record.name ?? record.recordId, PI_COLLAB_SUBAGENT_DEPTH: "1", COLLABORATING_AGENTS_DIR: dirs.base },
+          paneRef: record.paneRef,
+          surfaceRef: record.paneRef,
+          sessionId: (outcome.ok ? outcome.sessionId : undefined) ?? record.sessionId,
+          sessionFile: record.sessionFile,
+          resolvedModel: record.model,
+          coordinator: state.agentName,
+          awaitingReply: outcome.ok ? outcome.awaitingReply : undefined,
+          paneClosed: outcome.ok ? outcome.paneClosed : undefined,
+          paneCloseError: outcome.ok ? outcome.paneCloseError : undefined,
+        };
+        if (outcome.ok && outcome.timedOut && outcome.awaitingReply === undefined && !outcome.output) {
+          spawnResult.exitCode = 1;
+          spawnResult.error = "Timed out waiting for the resumed subagent turn to settle";
+          spawnResult.output = spawnResult.error;
+        }
+
+        markSubagentRunCompleted(record.recordId, spawnResult, []);
+        snapshotCompletedSubagents([spawnResult]);
+        updateStatus(ctx);
+
+        const failed = spawnResult.exitCode !== 0;
+        const text = kind === "adopt"
+          ? spawnResult.awaitingReply
+            ? `${label} asked a question while the coordinator was restarting:\n\n${spawnResult.awaitingReply}`
+            : failed
+              ? `${label} failed while the coordinator was restarting:\n\n${spawnResult.output}`
+              : `${label} finished while the coordinator was restarting:\n\n${spawnResult.output}`
+          : spawnResult.awaitingReply
+            ? `${label} answered and asked again:\n\n${spawnResult.awaitingReply}`
+            : failed
+              ? `${label} failed after resuming:\n\n${spawnResult.output}`
+              : `${label} resumed and finished:\n\n${spawnResult.output}`;
+        sendSubagentCompletionUpdate(
+          {
+            content: [{ type: "text", text }],
+            details: { mode: "subagent", resumed: true, adopted: kind === "adopt", result: spawnResult, childRunIds: [record.recordId] },
+            isError: failed,
+          },
+          ctx,
+          { targetSessionFile: launchSessionFile },
+        );
+        if (ctx.hasUI) ctx.ui.notify(failed ? "Subagent failed" : "Subagent completed", failed ? "error" : "info");
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const now = new Date().toISOString();
+        try {
+          updateSubagentRunRecord(dirs, record.recordId, { status: "failed", lastSeenAt: now, completedAt: now, outputPreview: msg });
+        } catch {
+          // Failure notification remains available even if durable storage is unavailable.
+        }
+        sendSubagentFailureUpdate(msg, [record.recordId], ctx, { targetSessionFile: launchSessionFile });
+      } finally {
+        state.activeSubagentRuns = Math.max(0, state.activeSubagentRuns - 1);
+        updateStatus(ctx);
+      }
+    })();
+  }
+
+  /**
+   * After a restart (`pi -c`, `/resume`, a crash) the waits of the previous
+   * process are gone. Pick up this session's pane children that are still marked
+   * running and whose launching process is dead, claim them so a second resume
+   * does not adopt them twice, and wait on their session files again. A child
+   * parked on a question keeps waiting for `reply`, which collects it.
+   */
+  function adoptOrphanedSubagentRuns(ctx: ExtensionContext): void {
+    const sessionId = ctx.sessionManager.getSessionId();
+    if (!sessionId) return;
+    let records: SubagentRunListRecord[];
+    try {
+      records = listSubagentRunRecords(dirs);
+    } catch {
+      return;
+    }
+    for (const record of records) {
+      if (!isActiveRunStatus(record.status) || record.awaitingReply) continue;
+      if (record.parentSessionId !== sessionId) continue;
+      if (typeof record.parentPid !== "number" || record.parentPid === process.pid || isProcessAlive(record.parentPid)) continue;
+
+      const previousPid = record.parentPid;
+      let claimed = false;
+      try {
+        claimed = updateSubagentRunRecordWith(dirs, record.recordId, (existing) => {
+          if (existing.parentPid !== previousPid || !isActiveRunStatus(existing.status)) return undefined;
+          claimed = true;
+          return { parentPid: process.pid, parentAgent: state.agentName, lastSeenAt: new Date().toISOString() };
+        }) && claimed;
+      } catch {
+        claimed = false;
+      }
+      if (!claimed) continue;
+
+      const adopted = adoptPaneSubagent({
+        launchMode: record.launchMode,
+        paneRef: record.paneRef,
+        sessionFile: record.sessionFile,
+        parentAgentName: state.agentName,
+        closePaneOnFinish: config.closeCompletedPanes,
+      });
+      if (!adopted.ok) continue;
+      collectResumedSubagentRun({ ...record, parentPid: process.pid }, adopted.outcome, ctx, "adopt");
+    }
+  }
+
   pi.registerTool({
     name: "agent_message",
     label: "Agent Message",
@@ -2848,77 +2988,7 @@ Subagent run selectors for session/tail: child run id/recordId, display name, ca
         // The resumed turn is collected exactly like a fresh background spawn: the
         // coordinator gets its tool result back now and the child's next report (or
         // next question) lands through the completion queue when it is ready.
-        const launchSessionFile = ctx.sessionManager.getSessionFile() ?? coordinatorSessionFile ?? localSessionFile;
-        state.activeSubagentRuns += 1;
-        updateStatus(ctx);
-        void (async () => {
-          try {
-            const outcome = await started.outcome;
-            const spawnResult: SpawnResult = {
-              agent: record.type,
-              name: record.name ?? record.recordId,
-              task: record.taskPreview,
-              exitCode: outcome.ok ? 0 : 1,
-              output: outcome.ok
-                ? (outcome.awaitingReply ? outcome.output?.trim() || outcome.awaitingReply : outcome.output?.trim() || "(no output)")
-                : outcome.error,
-              error: outcome.ok ? undefined : outcome.error,
-              launchMode: record.launchMode,
-              workingDirectory: record.cwd,
-              launchArgs: [],
-              launchCommand: "",
-              launchPrompt: "",
-              launchEnv: { PI_AGENT_NAME: record.name ?? record.recordId, PI_COLLAB_SUBAGENT_DEPTH: "1", COLLABORATING_AGENTS_DIR: dirs.base },
-              paneRef: record.paneRef,
-              surfaceRef: record.paneRef,
-              sessionId: (outcome.ok ? outcome.sessionId : undefined) ?? record.sessionId,
-              sessionFile: record.sessionFile,
-              resolvedModel: record.model,
-              coordinator: state.agentName,
-              awaitingReply: outcome.ok ? outcome.awaitingReply : undefined,
-              paneClosed: outcome.ok ? outcome.paneClosed : undefined,
-              paneCloseError: outcome.ok ? outcome.paneCloseError : undefined,
-            };
-            if (outcome.ok && outcome.timedOut && outcome.awaitingReply === undefined && !outcome.output) {
-              spawnResult.exitCode = 1;
-              spawnResult.error = "Timed out waiting for the resumed subagent turn to settle";
-              spawnResult.output = spawnResult.error;
-            }
-
-            markSubagentRunCompleted(record.recordId, spawnResult, []);
-            snapshotCompletedSubagents([spawnResult]);
-            updateStatus(ctx);
-
-            const failed = spawnResult.exitCode !== 0;
-            const text = spawnResult.awaitingReply
-              ? `${label} answered and asked again:\n\n${spawnResult.awaitingReply}`
-              : failed
-                ? `${label} failed after resuming:\n\n${spawnResult.output}`
-                : `${label} resumed and finished:\n\n${spawnResult.output}`;
-            sendSubagentCompletionUpdate(
-              {
-                content: [{ type: "text", text }],
-                details: { mode: "subagent", resumed: true, result: spawnResult, childRunIds: [record.recordId] },
-                isError: failed,
-              },
-              ctx,
-              { targetSessionFile: launchSessionFile },
-            );
-            if (ctx.hasUI) ctx.ui.notify(failed ? "Subagent failed" : "Subagent completed", failed ? "error" : "info");
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            const now = new Date().toISOString();
-            try {
-              updateSubagentRunRecord(dirs, record.recordId, { status: "failed", lastSeenAt: now, completedAt: now, outputPreview: msg });
-            } catch {
-              // Failure notification remains available even if durable storage is unavailable.
-            }
-            sendSubagentFailureUpdate(msg, [record.recordId], ctx, { targetSessionFile: launchSessionFile });
-          } finally {
-            state.activeSubagentRuns = Math.max(0, state.activeSubagentRuns - 1);
-            updateStatus(ctx);
-          }
-        })();
+        collectResumedSubagentRun(record, started.outcome, ctx, "reply");
 
         return {
           content: [
@@ -3422,6 +3492,7 @@ By default subagents use the same model as the spawning session.` ,
     syncFocusToCurrentSession(ctx);
     startRemoteSessionAutoRefresh(ctx);
     updateStatus(ctx);
+    if (event.reason !== "reload") adoptOrphanedSubagentRuns(ctx);
     flushPendingSubagentCompletionUpdates(ctx);
   });
 

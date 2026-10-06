@@ -1998,3 +1998,51 @@ describe("subagent launch identity", () => {
     await Promise.all((harness.handlers.get("session_shutdown") ?? []).map((handler) => handler(undefined, ctx)));
   });
 });
+
+describe("orphaned pane subagents", () => {
+  test("a resumed coordinator collects the pane child its previous process launched, and only that one", async () => {
+    const stateDir = makeTempDir("collab-index-adopt");
+    process.env.COLLABORATING_AGENTS_DIR = stateDir;
+    process.env.HOME = stateDir;
+    process.env.PATH = `${stateDir}:${ORIGINAL_PATH ?? ""}`;
+    const dirs = makeDirs(stateDir);
+    // A pid no process holds: the coordinator that launched the child is gone.
+    const deadPid = 2 ** 22 + 12_345;
+
+    const childSession = path.join(stateDir, "child.jsonl");
+    writeSessionJsonl(childSession, [
+      { type: "session", id: "child-session" },
+      { type: "message", id: "m-0", message: { role: "user", content: [{ type: "text", text: "Implement the edit dialog." }] } },
+      { type: "message", id: "m-1", message: { role: "assistant", content: [{ type: "text", text: "Done: edit mode wired." }] } },
+    ]);
+    const base = { launchMode: "herdr-pane" as const, paneRef: "w3A:pH", sessionFile: childSession, status: "running" as const };
+    expect(writeSubagentRunRecord(dirs, makeRunRecord({ ...base, recordId: "orphan-0", batchRunId: "orphan", name: "worker-orph-ClearOcean", displayName: "ClearOcean", parentPid: deadPid }))).toBe(true);
+    expect(writeSubagentRunRecord(dirs, makeRunRecord({ ...base, recordId: "alive-0", batchRunId: "alive", parentPid: process.ppid }))).toBe(true);
+    expect(writeSubagentRunRecord(dirs, makeRunRecord({ ...base, recordId: "other-0", batchRunId: "other", parentPid: deadPid, parentSessionId: "other-session" }))).toBe(true);
+    expect(writeSubagentRunRecord(dirs, makeRunRecord({ ...base, recordId: "parked-0", batchRunId: "parked", parentPid: deadPid, awaitingReply: "Which branch?" }))).toBe(true);
+
+    const harness = makeHarness();
+    collaboratingAgentsExtension(harness.pi);
+    const ctx = makeContext(stateDir);
+    for (const handler of harness.handlers.get("session_start") ?? []) await handler({ reason: "resume" }, ctx);
+
+    const record = await waitForRunRecord(stateDir, "orphan-0", (candidate) => candidate.status === "completed");
+    expect(record.parentPid).toBe(process.pid);
+    const message = await waitForCompletionMessage(harness);
+    expect(JSON.stringify(message)).toContain("ClearOcean");
+    expect((message.details as { adopted?: boolean }).adopted).toBe(true);
+
+    const untouched = listRecords(stateDir).filter((candidate) => candidate.recordId !== "orphan-0");
+    expect(untouched.map((candidate) => [candidate.recordId, candidate.status]).sort()).toEqual([
+      ["alive-0", "running"],
+      ["other-0", "running"],
+      ["parked-0", "running"],
+    ]);
+
+    // A second resume finds nothing left to adopt.
+    const before = harness.sentMessages.length;
+    for (const handler of harness.handlers.get("session_start") ?? []) await handler({ reason: "resume" }, ctx);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(harness.sentMessages.slice(before).filter((m) => (m as { details?: { adopted?: boolean } }).details?.adopted)).toEqual([]);
+  });
+});

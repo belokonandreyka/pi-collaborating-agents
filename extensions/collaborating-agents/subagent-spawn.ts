@@ -1680,6 +1680,93 @@ export type ReplyOutcome =
     }
   | { ok: false; error: string };
 
+/**
+ * Wait for a pane child's turn to settle and hand back what it ended on: the
+ * final report, a question, or the failure. The wait reads the child's session
+ * file, so it needs nothing from the process that launched the child.
+ */
+function collectPaneSubagentOutcome(args: {
+  paneRef: string;
+  sessionFile: string;
+  exitMarkerPath: string;
+  timeoutMs?: number;
+  parentAgentName?: string;
+  minUserMessages?: number;
+  closePaneOnFinish?: boolean;
+  closePaneRef?: string;
+  onProgress?: (progress: SubagentProgress) => void;
+}): Promise<ReplyOutcome> {
+  return (async (): Promise<ReplyOutcome> => {
+    const settled = await waitForSettledSessionResult({
+      sessionFile: args.sessionFile,
+      exitMarkerPath: args.exitMarkerPath,
+      timeoutMs: args.timeoutMs ?? PANE_RESULT_TIMEOUT_MS,
+      parentAgentName: args.parentAgentName,
+      isAlive: () => herdrPaneExists(args.paneRef),
+      minUserMessages: args.minUserMessages,
+      onUpdate: (state) => {
+        if (state.progress) args.onProgress?.(state.progress);
+      },
+    });
+
+    if (settled.terminalError !== undefined) return { ok: false, error: settled.terminalError };
+
+    const result: ReplyOutcome = {
+      ok: true,
+      output: settled.terminalAssistantText,
+      awaitingReply: settled.awaitingReply,
+      sessionId: settled.sessionId,
+      timedOut: settled.timedOut,
+    };
+
+    // Same rule as a fresh spawn: a finished child's pane is released, a parked or
+    // timed-out one stays open for inspection and for the next answer.
+    if (args.closePaneOnFinish && settled.awaitingReply === undefined && !settled.timedOut && settled.terminalAssistantText !== undefined) {
+      const closed = await closeSubagentPane({ paneRef: args.closePaneRef, surfaceRef: args.paneRef });
+      if (closed.ok) result.paneClosed = true;
+      else result.paneCloseError = closed.error;
+    }
+    return result;
+  })();
+}
+
+/**
+ * Take over the wait for a pane child whose coordinator process is gone.
+ *
+ * The launching process holds the only wait for a background child, in memory.
+ * When the coordinator restarts mid-run (`pi -c`, a crash, a closed terminal),
+ * the child finishes into nobody: its record stays "running" and its pane stays
+ * open (2026-10-06: a worker finished three minutes after the coordinator
+ * was restarted, and nothing was reported). The child's session file
+ * is the whole truth, so a resumed coordinator can wait on it again; a child
+ * that already finished settles at once.
+ */
+export function adoptPaneSubagent(args: {
+  launchMode: SubagentLaunchMode;
+  paneRef?: string;
+  sessionFile?: string;
+  parentAgentName?: string;
+  closePaneOnFinish?: boolean;
+  timeoutMs?: number;
+  onProgress?: (progress: SubagentProgress) => void;
+}): { ok: true; outcome: Promise<ReplyOutcome> } | { ok: false; error: string } {
+  if (args.launchMode !== "herdr-pane") return { ok: false, error: `adopting a ${args.launchMode} subagent is not supported` };
+  if (!args.paneRef || !args.sessionFile) return { ok: false, error: "no pane or session file recorded" };
+  return {
+    ok: true,
+    outcome: collectPaneSubagentOutcome({
+      paneRef: args.paneRef,
+      sessionFile: args.sessionFile,
+      exitMarkerPath: createSubagentExitMarkerPath(args.sessionFile),
+      timeoutMs: args.timeoutMs,
+      parentAgentName: args.parentAgentName,
+      closePaneOnFinish: args.closePaneOnFinish,
+      closePaneRef: args.paneRef,
+      onProgress: args.onProgress,
+    }),
+  };
+}
+
 export interface ReplyToSubagentArgs {
   launchMode: SubagentLaunchMode;
   paneRef?: string;
@@ -1735,38 +1822,17 @@ export async function startReplyToSubagent(
   const delivered = await herdrSendLine(paneRef, answer);
   if (!delivered.ok) return { ok: false, error: `Could not deliver the reply: ${delivered.error}` };
 
-  const outcome = (async (): Promise<ReplyOutcome> => {
-    const settled = await waitForSettledSessionResult({
-      sessionFile: args.sessionFile,
-      exitMarkerPath,
-      timeoutMs: args.timeoutMs ?? PANE_RESULT_TIMEOUT_MS,
-      parentAgentName: args.parentAgentName,
-      isAlive: () => herdrPaneExists(paneRef),
-      minUserMessages,
-      onUpdate: (state) => {
-        if (state.progress) args.onProgress?.(state.progress);
-      },
-    });
-
-    if (settled.terminalError !== undefined) return { ok: false, error: settled.terminalError };
-
-    const result: ReplyOutcome = {
-      ok: true,
-      output: settled.terminalAssistantText,
-      awaitingReply: settled.awaitingReply,
-      sessionId: settled.sessionId,
-      timedOut: settled.timedOut,
-    };
-
-    // Same rule as a fresh spawn: a finished child's pane is released, a parked or
-    // timed-out one stays open for inspection and for the next answer.
-    if (args.closePaneOnFinish && settled.awaitingReply === undefined && !settled.timedOut && settled.terminalAssistantText !== undefined) {
-      const closed = await closeSubagentPane({ paneRef: args.paneRef, surfaceRef: paneRef });
-      if (closed.ok) result.paneClosed = true;
-      else result.paneCloseError = closed.error;
-    }
-    return result;
-  })();
+  const outcome = collectPaneSubagentOutcome({
+    paneRef,
+    sessionFile: args.sessionFile,
+    exitMarkerPath,
+    timeoutMs: args.timeoutMs,
+    parentAgentName: args.parentAgentName,
+    minUserMessages,
+    closePaneOnFinish: args.closePaneOnFinish,
+    closePaneRef: args.paneRef,
+    onProgress: args.onProgress,
+  });
 
   return { ok: true, outcome };
 }

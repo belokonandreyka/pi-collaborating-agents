@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { SpawnAgentDefinition } from "./subagent-spawn.ts";
 import {
+  adoptPaneSubagent,
   collectInheritedPaneEnv,
   buildPaneCommand,
   discoverSpawnAgents,
@@ -2854,6 +2855,39 @@ describe("answering a parked subagent", () => {
       expect(outcome.output).toBe("Diffed against test: 3 files.");
       expect(outcome.awaitingReply).toBeUndefined();
     }
+  });
+
+  test("adoptPaneSubagent collects a child that finished after its coordinator was gone, and closes its pane", async () => {
+    const tempDir = makeTempDir("collab-adopt");
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+
+    const line = (id: string, message: Record<string, unknown>) => JSON.stringify({ type: "message", id, message });
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    fs.writeFileSync(
+      sessionFile,
+      [
+        JSON.stringify({ type: "session", id: "s-orphan" }),
+        line("m-0", { role: "user", content: [{ type: "text", text: "Implement the fix." }] }),
+        line("m-1", { role: "assistant", content: [{ type: "text", text: "Done: 2 files changed." }] }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const adopted = adoptPaneSubagent({ launchMode: "herdr-pane", paneRef: "w1:p7", sessionFile, closePaneOnFinish: true });
+    expect(adopted.ok).toBe(true);
+    if (!adopted.ok) return;
+    const outcome = await adopted.outcome;
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.output).toBe("Done: 2 files changed.");
+      expect(outcome.paneClosed).toBe(true);
+    }
+    expect(getCapturedHerdrArgs(herdrArgsFile).map((entry) => `${entry[0]} ${entry[1]} ${entry[2]}`)).toEqual(["pane close w1:p7"]);
+
+    expect(adoptPaneSubagent({ launchMode: "process", paneRef: "w1:p7", sessionFile }).ok).toBe(false);
+    expect(adoptPaneSubagent({ launchMode: "herdr-pane", sessionFile }).ok).toBe(false);
   });
 
   test("refuses to report a delivery when the child has already exited", async () => {

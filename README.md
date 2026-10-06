@@ -463,6 +463,8 @@ Full output and failure detail remain in the durable run/session registry. This 
 
 When `true`, a deliverable final completion is sent with `triggerTurn: true` once the coordinator is idle. The default remains `false` for compatibility. In hidden completion mode, the triggered coordinator turn must inspect the Run IDs from the wake token with `agent_message` `session` / `tail` to retrieve the result.
 
+A `herdr-pane` child outlives a coordinator restart. The wait for its result lives in the process that launched it. So when the same session is resumed (`pi -c`, `/resume`, after a crash), the extension looks for that session's runs still marked running whose launching process is gone. It claims them and waits on their session files again. A child that already finished is reported at once, as "finished while the coordinator was restarting", and its pane is released as usual. A child parked on a question keeps waiting for `reply`.
+
 With automatic turn triggering enabled, subagents do not need to send an urgent completion DM merely to wake the coordinator. Avoid using both mechanisms for the same completion because they can race and start competing coordinator turns.
 
 A quiet auto-resume configuration is:
