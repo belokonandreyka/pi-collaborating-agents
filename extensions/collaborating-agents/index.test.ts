@@ -348,6 +348,33 @@ describe("tool documentation metadata", () => {
 });
 
 describe("agent_message subagent sessions", () => {
+  test("verbose session and status return the full final report from the session file", () => {
+    const tempDir = makeTempDir("collab-full-report");
+    const dirs = makeDirs(path.join(tempDir, "state"));
+    const sessionFile = path.join(tempDir, "child.jsonl");
+    const report = `## Review\n${"finding line\n".repeat(400)}END-OF-REPORT`;
+    writeSessionJsonl(sessionFile, [
+      { type: "message", message: { role: "assistant", content: [{ type: "text", text: "earlier note" }] } },
+      { type: "message", message: { role: "assistant", content: [{ type: "text", text: report }] } },
+    ]);
+    expect(writeSubagentRunRecord(dirs, makeRunRecord({
+      recordId: "run-long",
+      status: "completed",
+      completedAt: "2026-01-01T00:10:00.000Z",
+      sessionFile,
+      outputPreview: report,
+    }))).toBe(true);
+    const ctx = { parentAgent: "Coordinator", parentSessionId: "parent-session", parentPid: 123, now: "2026-01-01T00:11:00.000Z" };
+
+    const verbose = handleAgentMessageSession(dirs, { runId: "run-long", verbose: true }, ctx);
+    const text = (verbose.content[0] as { text: string }).text;
+    expect(text).toContain("END-OF-REPORT");
+    expect(text).not.toContain("[truncated from");
+
+    const compact = handleAgentMessageSession(dirs, { runId: "run-long" }, ctx);
+    expect((compact.content[0] as { text: string }).text).toContain("pass verbose: true for all");
+  });
+
   test("sessions lists scoped runs newest first with completed filtering, stale markers, and truncation", () => {
     const stateDir = makeTempDir("collab-index-sessions-list");
     const dirs = makeDirs(stateDir);

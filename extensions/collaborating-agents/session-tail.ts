@@ -402,3 +402,33 @@ export function formatSessionTail(entries: SessionTailEntry[], options: SessionT
     return `${prefix}stop: ${entry.stopReason}`;
   }).join("\n");
 }
+
+/**
+ * The child's last assistant text, untruncated. The run record keeps only a
+ * 2000-char preview of the final report, so a long reviewer or worker report
+ * came back cut and the coordinator went digging in the session JSONL itself.
+ */
+export function readFinalAssistantText(sessionFile: string): string | undefined {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(sessionFile, "utf-8");
+  } catch {
+    return undefined;
+  }
+  const lines = raw.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]?.trim();
+    if (!line) continue;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const message = event.message as Record<string, unknown> | undefined;
+    if (!message || message.role !== "assistant") continue;
+    const text = textParts(message.content).join("\n").trim();
+    if (text) return text;
+  }
+  return undefined;
+}

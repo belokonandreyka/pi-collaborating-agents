@@ -77,7 +77,7 @@ import {
   formatSubagentType,
   getDefaultSubagentType,
 } from "./subagent-types.js";
-import { formatSessionTail, readSessionTail, TAIL_HARD_CAP_BYTES } from "./session-tail.js";
+import { formatSessionTail, readFinalAssistantText, readSessionTail, TAIL_HARD_CAP_BYTES } from "./session-tail.js";
 
 const STATUS_KEY = "collab";
 const WATCH_DEBOUNCE_MS = 40;
@@ -164,7 +164,7 @@ const SubagentParams = Type.Object({
 });
 
 const SUBAGENT_MAX_PARALLEL = 8;
-const SUBAGENT_MAX_CONCURRENCY = 4;
+const SUBAGENT_MAX_CONCURRENCY = 6;
 const SUBAGENT_DEFAULT_MAX_DEPTH = 2;
 const SUBAGENT_LAUNCH_STAGGER_MS = 250;
 
@@ -300,6 +300,14 @@ export function formatSubagentRunList(args: {
   }
 
   return `Subagent sessions (${args.records.length} of ${args.total}):\n${lines.join("\n")}`;
+}
+
+/** A finished run's record with the full final report read back from its session file when the stored preview was cut. */
+export function withFullFinalReport<T extends SubagentRunListRecord>(record: T): T {
+  const finished = record.status === "completed" || record.status === "failed";
+  if (!finished || !record.sessionFile || !record.outputPreview?.includes(" [truncated from ")) return record;
+  const full = readFinalAssistantText(record.sessionFile);
+  return full ? { ...record, outputPreview: full } : record;
 }
 
 export function formatSubagentRunDetail(record: SubagentRunListRecord, verbose = false): string {
@@ -561,7 +569,9 @@ export function handleAgentMessageSession(
     };
   }
 
-  const { record, sessionFileResolved } = refreshResolvedRunRecord(dirs, resolved.record, context);
+  const refreshed = refreshResolvedRunRecord(dirs, resolved.record, context);
+  const sessionFileResolved = refreshed.sessionFileResolved;
+  const record = params.verbose === true ? withFullFinalReport(refreshed.record) : refreshed.record;
   return {
     content: [{ type: "text", text: formatSubagentRunDetail(record, params.verbose === true) }],
     details: {
@@ -791,7 +801,7 @@ export function handleAgentMessageTail(
   // once the coordinator only cares about "is it done?" plus the structured
   // final report the run record already carries.
   if (params.mode === "status") {
-    return handleAgentMessageTailStatus(record, requestedSelector, params, sessionFile, session.resolved);
+    return handleAgentMessageTailStatus(withFullFinalReport(record), requestedSelector, params, sessionFile, session.resolved);
   }
 
   if (!sessionFile) {
