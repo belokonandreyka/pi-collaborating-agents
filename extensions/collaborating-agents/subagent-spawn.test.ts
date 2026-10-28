@@ -16,6 +16,8 @@ import {
   resolveSpawnAgentDefinition,
   replyToSubagent,
   startReplyToSubagent,
+  watchAnsweredSubagent,
+  countSessionUserMessages,
   runSpawnTask,
   waitForSettledSessionResult,
 } from "./subagent-spawn.ts";
@@ -2855,6 +2857,71 @@ describe("answering a parked subagent", () => {
       expect(outcome.output).toBe("Diffed against test: 3 files.");
       expect(outcome.awaitingReply).toBeUndefined();
     }
+  });
+
+  test("watchAnsweredSubagent settles on the turn a delivered direct message started, not the question turn", async () => {
+    const tempDir = makeTempDir("collab-watch-send-answer");
+    const { argsFile: herdrArgsFile } = writeFakeHerdrBinary(tempDir);
+    process.env.PATH = `${tempDir}:${process.env.PATH ?? ""}`;
+    process.env.TEST_HERDR_ARGS_FILE = herdrArgsFile;
+
+    const line = (id: string, message: Record<string, unknown>) => JSON.stringify({ type: "message", id, message });
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    fs.writeFileSync(
+      sessionFile,
+      [
+        JSON.stringify({ type: "session", id: "s-send" }),
+        line("m-0", { role: "user", content: [{ type: "text", text: "Fix the sleep day." }] }),
+        line("m-1", {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [
+            { type: "toolCall", id: "t-1", name: "agent_message", arguments: { action: "send", to: "VividQuartz", message: "Which timezone?" } },
+          ],
+        }),
+        line("m-2", { role: "assistant", content: [{ type: "text", text: "Waiting on the timezone." }] }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const before = countSessionUserMessages(sessionFile, "VividQuartz");
+    expect(before).toBe(1);
+    const watch = watchAnsweredSubagent({
+      launchMode: "herdr-pane",
+      paneRef: "w1:p2",
+      sessionFile,
+      parentAgentName: "VividQuartz",
+      minUserMessages: before + 1,
+    });
+    expect(watch.ok).toBe(true);
+    if (!watch.ok) return;
+
+    let settledEarly = false;
+    void watch.outcome.then(() => {
+      settledEarly = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settledEarly).toBe(false);
+
+    fs.appendFileSync(
+      sessionFile,
+      [
+        JSON.stringify({ type: "custom_message", customType: "collab_inbox_message", content: "End timezone.", display: true }),
+        line("m-3", { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "t-2", name: "edit", arguments: {} }] }),
+        line("m-4", { role: "assistant", content: [{ type: "text", text: "Done: 10 files." }] }),
+      ].join("\n") + "\n",
+      "utf-8",
+    );
+
+    const outcome = await watch.outcome;
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.awaitingReply).toBeUndefined();
+      expect(outcome.output).toBe("Done: 10 files.");
+    }
+    // Nothing is typed into the pane: the answer already went through the inbox.
+    const captured = fs.existsSync(herdrArgsFile) ? fs.readFileSync(herdrArgsFile, "utf-8") : "";
+    expect(captured).not.toContain("send-text");
   });
 
   test("adoptPaneSubagent collects a child that finished after its coordinator was gone, and closes its pane", async () => {

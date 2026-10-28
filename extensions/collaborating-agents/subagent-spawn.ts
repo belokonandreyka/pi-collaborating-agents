@@ -1115,6 +1115,15 @@ function parseSessionMessageLine(
     if (sessionId) return { sessionId };
   }
 
+  // A direct message delivered into the child (`agent_message` send) is recorded as
+  // a custom message and starts a turn just as typed input does, so it counts as
+  // the answer arriving. Coordinators answer a question this way as often as with
+  // `reply` (2026-10-28: GoldenThunder finished after a send-answer and its report
+  // was never collected).
+  if (parsed.type === "custom_message" && parsed.customType === "collab_inbox_message") {
+    return { userMessage: true };
+  }
+
   if ((parsed.type !== "message" && parsed.type !== "message_end") || !parsed.message || typeof parsed.message !== "object") {
     return {};
   }
@@ -1822,13 +1831,36 @@ export async function startReplyToSubagent(
   const delivered = await herdrSendLine(paneRef, answer);
   if (!delivered.ok) return { ok: false, error: `Could not deliver the reply: ${delivered.error}` };
 
+  return watchAnsweredSubagent({ ...args, minUserMessages });
+}
+
+/** User messages (typed input and delivered direct messages) in a child's transcript so far. */
+export function countSessionUserMessages(sessionFile: string, parentAgentName?: string): number {
+  return readSpawnSessionState(sessionFile, parentAgentName).userMessageCount ?? 0;
+}
+
+/**
+ * Wait for what a parked child does after its answer has been delivered some other
+ * way than `startReplyToSubagent` — a direct message the child's inbox turns into
+ * a new turn. `minUserMessages` is the transcript's count before that delivery
+ * plus one, so the final text of the turn that asked is not taken as the result.
+ */
+export function watchAnsweredSubagent(
+  args: Omit<ReplyToSubagentArgs, "message"> & { minUserMessages: number },
+): { ok: true; outcome: Promise<ReplyOutcome> } | { ok: false; error: string } {
+  if (args.launchMode !== "herdr-pane") {
+    return { ok: false, error: `Watching a live subagent is implemented for herdr-pane only; this one ran under ${args.launchMode}.` };
+  }
+  const paneRef = args.paneRef ?? args.surfaceRef;
+  if (!paneRef) return { ok: false, error: "No pane reference recorded for this subagent." };
+
   const outcome = collectPaneSubagentOutcome({
     paneRef,
     sessionFile: args.sessionFile,
-    exitMarkerPath,
+    exitMarkerPath: createSubagentExitMarkerPath(args.sessionFile),
     timeoutMs: args.timeoutMs,
     parentAgentName: args.parentAgentName,
-    minUserMessages,
+    minUserMessages: args.minUserMessages,
     closePaneOnFinish: args.closePaneOnFinish,
     closePaneRef: args.paneRef,
     onProgress: args.onProgress,

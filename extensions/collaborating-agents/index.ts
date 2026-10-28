@@ -55,6 +55,8 @@ import {
   adoptPaneSubagent,
   runSpawnTask,
   startReplyToSubagent,
+  watchAnsweredSubagent,
+  countSessionUserMessages,
   type ReplyOutcome,
   type SpawnAgentDefinition,
   type SpawnResult,
@@ -2806,6 +2808,20 @@ Subagent run selectors for session/tail: child run id/recordId, display name, ca
           };
         }
 
+        // A message to our own child parked on a question is its answer: the child's
+        // inbox turns it into a new turn, so the run must be watched again exactly
+        // as after `reply`. Without this the park was the last thing the coordinator
+        // ever saw — the child finished, and its report was never collected.
+        const parked = listSubagentRunRecords(dirs).find(
+          (r) =>
+            r.name === resolvedPeer.name &&
+            r.parentAgent === state.agentName &&
+            r.status === "running" &&
+            Boolean(r.awaitingReply) &&
+            Boolean(r.sessionFile),
+        );
+        const userMessagesBefore = parked?.sessionFile ? countSessionUserMessages(parked.sessionFile, state.agentName) : 0;
+
         const sendResult = sendDirect(dirs, state.agentName, resolvedPeer.name, params.message, params.replyTo, urgent);
         if (!sendResult.ok) {
           return {
@@ -2815,14 +2831,42 @@ Subagent run selectors for session/tail: child run id/recordId, display name, ca
           };
         }
 
+        let resumedNote = "";
+        if (parked?.sessionFile) {
+          const watch = watchAnsweredSubagent({
+            launchMode: parked.launchMode,
+            paneRef: parked.paneRef,
+            sessionFile: parked.sessionFile,
+            parentAgentName: state.agentName,
+            minUserMessages: userMessagesBefore + 1,
+            closePaneOnFinish: config.closeCompletedPanes,
+            onProgress: createSubagentProgressReporter(
+              () => parked.displayName ?? parked.name ?? parked.recordId,
+              config.subagentProgressIntervalMs,
+              ctx,
+            ),
+          });
+          if (watch.ok) {
+            safeUpdateSubagentRunRecordWith(parked.recordId, "reply", [], () => ({
+              awaitingReply: null,
+              status: "running",
+              completedAt: undefined,
+              exitCode: undefined,
+              lastSeenAt: new Date().toISOString(),
+            }));
+            collectResumedSubagentRun(parked, watch.outcome, ctx, "reply");
+            resumedNote = `\nThis answers its question; run ${parked.recordId} resumed in background and its report is auto-collected.`;
+          }
+        }
+
         return {
           content: [
             {
               type: "text",
-              text: `Sent ${urgent ? "urgent " : ""}direct message to ${resolvedPeer.name}.`,
+              text: `Sent ${urgent ? "urgent " : ""}direct message to ${resolvedPeer.name}.${resumedNote}`,
             },
           ],
-          details: { action, to: resolvedPeer.name, requestedTo: params.to, urgent, ok: true },
+          details: { action, to: resolvedPeer.name, requestedTo: params.to, urgent, ok: true, resumedRunId: resumedNote ? parked?.recordId : undefined },
         };
       }
 
