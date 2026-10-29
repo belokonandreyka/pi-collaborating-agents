@@ -1003,7 +1003,25 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     };
   }
 
+  /**
+   * Background runs finish after /reload or a session switch, holding the ctx
+   * they started with; pi throws on any use of it then, and an uncaught throw
+   * ends pi. The status goes through the current ctx instead, or not at all.
+   */
   function updateStatus(ctx: ExtensionContext): void {
+    try {
+      renderStatus(ctx);
+    } catch {
+      if (!lastContext || lastContext === ctx) return;
+      try {
+        renderStatus(lastContext);
+      } catch {
+        // No live ctx yet; the next event redraws the status.
+      }
+    }
+  }
+
+  function renderStatus(ctx: ExtensionContext): void {
     if (!ctx.hasUI) return;
 
     const activePeers = listActiveAgents(dirs, state.agentName);
@@ -2529,7 +2547,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         state.activeSubagentRuns = Math.max(0, state.activeSubagentRuns - 1);
         updateStatus(ctx);
       }
-    })();
+    })().catch(() => {});
 
     return { batchRunId, childRunIds };
   }
@@ -2623,7 +2641,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         state.activeSubagentRuns = Math.max(0, state.activeSubagentRuns - 1);
         updateStatus(ctx);
       }
-    })();
+    })().catch(() => {});
   }
 
   /**
