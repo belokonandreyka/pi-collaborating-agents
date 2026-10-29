@@ -2375,7 +2375,11 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     updateStatus(ctx);
   }
 
-  function subagentBatchLimitReached(): boolean {
+  function subagentBatchLimitReached(cwd: string): boolean {
+    // The check runs before the launch reloads the config, so read it here: a limit
+    // raised mid-session was otherwise ignored by every launch until some other
+    // agent_message call happened to reload it (2026-10-29: 6 set, refused at 4).
+    config = loadConfig(cwd);
     const max = config.maxConcurrentSubagentBatches;
     return max > 0 && state.activeSubagentRuns >= max;
   }
@@ -3181,7 +3185,7 @@ By default subagents use the same model as the spawning session.` ,
         };
       }
 
-      if (subagentBatchLimitReached()) {
+      if (subagentBatchLimitReached(ctx.cwd)) {
         const text = subagentRunInProgressMessage();
         if (ctx.hasUI) ctx.ui.notify("Subagent run already in progress", "warning");
         return {
@@ -3271,7 +3275,7 @@ By default subagents use the same model as the spawning session.` ,
         return;
       }
 
-      if (subagentBatchLimitReached()) {
+      if (subagentBatchLimitReached(ctx.cwd)) {
         ctx.ui.notify("Subagent run already in progress", "warning");
         return;
       }
