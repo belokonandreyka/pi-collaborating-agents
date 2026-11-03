@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The `●N` unread counter in the status line now counts only messages the agent has not processed: a message delivered before a turn started is dropped from it when that turn ends. Previously it only grew (83 on a planner session) until the next subagent wave.
 - Fixed the completion wake for a parked question still arriving after the coordinator had already answered it. The wake is built when the child parks (usually while the coordinator is mid-turn) and delivered once it is idle; the `answered` check ran only at build time, so a reply that landed in between (typically 2–10 s) was followed by "A subagent is waiting on your answer" and a wasted turn. Queued wakes are now rebuilt at delivery and dropped when nothing is left to say.
 - A transient provider error that the child retried past (Pi retries timeouts itself) no longer sticks as the run's terminal error: a later tool call clears it, and the error settle window is 120 s instead of 15 s so a retry's own request time does not fail the run. Previously one "Request timed out." followed by a pause of over 15 s marked a still-working child as failed and its final report was never collected.
 - Removed the one-batch-at-a-time restriction on `subagent`: independent batches may now run concurrently, each posting its own completion, bounded by the new `maxConcurrentSubagentBatches` config key (default 4, `0` = unlimited). Previously any launch while another run was active was refused with "A subagent run is already in progress".

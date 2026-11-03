@@ -1111,10 +1111,21 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     }
   }
 
+  // ●N in the status counts messages the agent has not processed yet: a message
+  // delivered before a turn started is in that turn's context, so turn_end drops it.
+  // Without this the counter only grew until the next subagent wave.
+  let inboxDeliveries: { from: string; at: number }[] = [];
+  let turnStartedAt = 0;
+
+  function recountUnread(): void {
+    state.unreadCounts.clear();
+    for (const d of inboxDeliveries) state.unreadCounts.set(d.from, (state.unreadCounts.get(d.from) ?? 0) + 1);
+  }
+
   function deliverInboxMessage(msg: InboxMessage): void {
     if (msg.from !== state.agentName) {
-      const current = state.unreadCounts.get(msg.from) ?? 0;
-      state.unreadCounts.set(msg.from, current + 1);
+      inboxDeliveries.push({ from: msg.from, at: Date.now() });
+      recountUnread();
     }
 
     const senderLabel = formatAgentDisplayName(msg.from);
@@ -2510,6 +2521,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     // still running must not wipe what the coordinator already knows about them.
     if (state.activeSubagentRuns === 0) {
       state.completedSubagents = [];
+      inboxDeliveries = [];
       state.unreadCounts.clear();
     }
     state.activeSubagentRuns += 1;
@@ -3584,8 +3596,14 @@ By default subagents use the same model as the spawning session.` ,
     flushPendingSubagentCompletionUpdates(ctx);
   });
 
+  pi.on("turn_start", async () => {
+    turnStartedAt = Date.now();
+  });
+
   pi.on("turn_end", async (_event, ctx) => {
     lastContext = ctx;
+    inboxDeliveries = inboxDeliveries.filter((d) => d.at >= turnStartedAt);
+    recountUnread();
     if (!state.registered) return;
     refreshRegistration(ctx);
     updateStatus(ctx);

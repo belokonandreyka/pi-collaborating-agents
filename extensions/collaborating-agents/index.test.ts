@@ -13,7 +13,7 @@ import collaboratingAgentsExtension, {
   handleAgentMessageSessions,
   handleAgentMessageTail,
 } from "./index.ts";
-import { listSubagentRunRecords, registerSelf, updateSubagentRunRecord, writeSubagentRunRecord } from "./store.ts";
+import { enqueueInboxMessage, listSubagentRunRecords, registerSelf, updateSubagentRunRecord, writeSubagentRunRecord } from "./store.ts";
 import type { AgentRegistration, Dirs, SubagentRunListRecord, SubagentRunRecord } from "./types.ts";
 
 const tempDirs: string[] = [];
@@ -2071,5 +2071,52 @@ describe("orphaned pane subagents", () => {
     for (const handler of harness.handlers.get("session_start") ?? []) await handler({ reason: "resume" }, ctx);
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(harness.sentMessages.slice(before).filter((m) => (m as { details?: { adopted?: boolean } }).details?.adopted)).toEqual([]);
+  });
+});
+
+describe("unread counter", () => {
+  test("●N counts inbox messages until a turn that started after them ends", async () => {
+    const stateDir = makeTempDir("collab-unread");
+    process.env.COLLABORATING_AGENTS_DIR = stateDir;
+    process.env.HOME = stateDir;
+    const dirs = makeDirs(stateDir);
+
+    const harness = makeHarness();
+    collaboratingAgentsExtension(harness.pi);
+    const statuses: string[] = [];
+    const ctx = makeContext(stateDir);
+    (ctx.ui as { setStatus: (key: string, text?: string) => void }).setStatus = (_key, text) => {
+      if (text !== undefined) statuses.push(text);
+    };
+    for (const handler of harness.handlers.get("session_start") ?? []) await handler({ reason: "startup" }, ctx);
+    const self = fs.readdirSync(dirs.registry).find((f) => f.endsWith(".json"))!.replace(/\.json$/, "");
+    const fire = async (event: string) => {
+      for (const handler of harness.handlers.get(event) ?? []) await handler({}, ctx);
+    };
+    const send = (id: string) =>
+      enqueueInboxMessage(dirs, self, { id, from: "CalmRiver", to: self, text: id, kind: "direct", timestamp: new Date().toISOString() });
+    const lastStatus = async (pattern: RegExp) => {
+      for (let i = 0; i < 50 && !pattern.test(statuses.at(-1) ?? ""); i++) await new Promise((r) => setTimeout(r, 20));
+      return statuses.at(-1) ?? "";
+    };
+
+    send("m1");
+    send("m2");
+    expect(await lastStatus(/●2/)).toContain("●2");
+
+    // The turn that consumes m1/m2 starts after them; m3 lands mid-turn and stays pending.
+    await new Promise((r) => setTimeout(r, 5));
+    await fire("turn_start");
+    await new Promise((r) => setTimeout(r, 5));
+    send("m3");
+    await lastStatus(/●3/);
+    await fire("turn_end");
+    expect(statuses.at(-1)).toContain("●1");
+
+    await fire("turn_start");
+    await fire("turn_end");
+    expect(statuses.at(-1)).not.toContain("●");
+
+    for (const handler of harness.handlers.get("session_shutdown") ?? []) await handler({}, ctx);
   });
 });
