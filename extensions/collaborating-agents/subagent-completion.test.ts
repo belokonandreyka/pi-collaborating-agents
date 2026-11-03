@@ -3,8 +3,10 @@ import {
   buildSubagentCompletionMessagePayload,
   collectSpawnResults,
   partitionPendingSubagentCompletionUpdates,
+  refreshPendingSubagentCompletionUpdates,
   shouldDeferSubagentCompletionUpdate,
   type PendingSubagentCompletionUpdate,
+  type QuestionState,
 } from "./subagent-completion.ts";
 import type { SpawnResult } from "./subagent-spawn.ts";
 
@@ -355,5 +357,56 @@ describe("parked questions the parent already knows about", () => {
     expect(payload?.content).toContain("BlueLake");
     expect(payload?.content).not.toContain("Q1");
     expect(payload?.content).toContain("Received final results from BlueLake.");
+  });
+});
+
+describe("a queued wake is re-evaluated when it is finally delivered", () => {
+  const parked = () => makeSpawnResult({ name: "worker-bc76-WarmMeadow", output: "", awaitingReply: "Build 51 prepared. Commit it?" });
+  const result = () => ({ content: [{ type: "text" as const, text: "" }], details: { result: parked(), childRunIds: ["bc7697e4-0"] } });
+
+  function queued(stateRef: { current: QuestionState }): PendingSubagentCompletionUpdate {
+    const build = () =>
+      buildSubagentCompletionMessagePayload(result(), { hiddenWake: true, questionState: () => stateRef.current });
+    // Built while the parent is busy: the question is still open at this point.
+    return { payload: build()!, targetSessionFile: "/tmp/a.jsonl", triggerTurn: true, rebuild: build };
+  }
+
+  test("the parent answered before the flush: the wake is dropped", () => {
+    const stateRef: { current: QuestionState } = { current: undefined };
+    const entry = queued(stateRef);
+    expect(entry.payload.content).toContain("waiting on your answer");
+
+    stateRef.current = "answered";
+    expect(refreshPendingSubagentCompletionUpdates([entry])).toEqual([]);
+  });
+
+  test("still unanswered at the flush: the wake goes out as built", () => {
+    const stateRef: { current: QuestionState } = { current: undefined };
+    const entry = queued(stateRef);
+
+    const refreshed = refreshPendingSubagentCompletionUpdates([entry]);
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0].payload.content).toContain("waiting on your answer");
+    expect(refreshed[0].targetSessionFile).toBe("/tmp/a.jsonl");
+    expect(refreshed[0].triggerTurn).toBe(true);
+  });
+
+  test("the question reached the parent as a DM meanwhile: the wake is annotated, not dropped", () => {
+    const stateRef: { current: QuestionState } = { current: undefined };
+    const entry = queued(stateRef);
+    expect(entry.payload.content).not.toContain("already reached you");
+
+    stateRef.current = "delivered";
+    const refreshed = refreshPendingSubagentCompletionUpdates([entry]);
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0].payload.content).toContain("already reached you as a direct message");
+  });
+
+  test("entries without rebuild (progress lines, failures) pass through untouched", () => {
+    const plain: PendingSubagentCompletionUpdate = {
+      payload: { customType: "collab_focus_status", content: "Subagent X is working", display: true, details: {} },
+    };
+    const stateRef: { current: QuestionState } = { current: "answered" };
+    expect(refreshPendingSubagentCompletionUpdates([plain, queued(stateRef)])).toEqual([plain]);
   });
 });

@@ -69,6 +69,7 @@ import {
   normalizeQuestionText,
   collectSpawnResults,
   partitionPendingSubagentCompletionUpdates,
+  refreshPendingSubagentCompletionUpdates,
   shouldDeferSubagentCompletionUpdate,
   type PendingSubagentCompletionUpdate,
   type SubagentCompletionMessagePayload,
@@ -2234,8 +2235,9 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     targetSessionFile: string | undefined,
     ctx?: ExtensionContext,
     triggerTurn = false,
+    rebuild?: PendingSubagentCompletionUpdate["rebuild"],
   ): void {
-    pendingSubagentCompletionUpdates.push({ payload, targetSessionFile, triggerTurn });
+    pendingSubagentCompletionUpdates.push({ payload, targetSessionFile, triggerTurn, rebuild });
     schedulePendingSubagentCompletionFlush(ctx);
   }
 
@@ -2255,8 +2257,11 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     pendingSubagentCompletionUpdates.length = 0;
     pendingSubagentCompletionUpdates.push(...deferred);
 
+    // A wake built while the parent was busy may be stale by now: the parent's
+    // reply to the parked question typically lands between the park and this
+    // flush. Rebuild from the current run records and drop what no longer applies.
     const retry: PendingSubagentCompletionUpdate[] = [];
-    for (const entry of deliverable) {
+    for (const entry of refreshPendingSubagentCompletionUpdates(deliverable)) {
       if (!trySendSubagentStatusPayload(entry.payload, ctx, entry.triggerTurn)) {
         retry.push(entry);
       }
@@ -2303,7 +2308,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
   function sendSubagentStatusPayload(
     payload: SubagentCompletionMessagePayload,
     ctx?: ExtensionContext,
-    options?: { targetSessionFile?: string; triggerTurn?: boolean },
+    options?: { targetSessionFile?: string; triggerTurn?: boolean; rebuild?: PendingSubagentCompletionUpdate["rebuild"] },
   ): void {
     const activeCtx = ctx ?? lastContext;
     if (!activeCtx) {
@@ -2319,12 +2324,12 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     const targetSessionFile = resolveSubagentCompletionTargetSessionFile(options?.targetSessionFile);
 
     if (shouldDeferSubagentCompletionUpdate({ targetSessionFile, activeSessionFile })) {
-      queueSubagentCompletionPayload(payload, targetSessionFile, activeCtx, options?.triggerTurn);
+      queueSubagentCompletionPayload(payload, targetSessionFile, activeCtx, options?.triggerTurn, options?.rebuild);
       return;
     }
 
     if (!trySendSubagentStatusPayload(payload, activeCtx, options?.triggerTurn)) {
-      queueSubagentCompletionPayload(payload, targetSessionFile, activeCtx, options?.triggerTurn);
+      queueSubagentCompletionPayload(payload, targetSessionFile, activeCtx, options?.triggerTurn, options?.rebuild);
     }
   }
 
@@ -2337,16 +2342,23 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
     ctx: ExtensionContext,
     options?: { targetSessionFile?: string },
   ): void {
-    const payload = buildSubagentCompletionMessagePayload(result, {
-      hiddenWake: config.subagentCompletionDisplay === "hidden",
-      questionState: questionStateForWake,
-    });
+    const build = () =>
+      buildSubagentCompletionMessagePayload(result, {
+        hiddenWake: config.subagentCompletionDisplay === "hidden",
+        questionState: questionStateForWake,
+      });
+    const payload = build();
     // null: the only thing this batch had to say was a question the parent has
     // already answered — a wake would make it doubt its own reply.
     if (!payload) return;
+    // A park is usually detected while the parent is mid-turn, so the wake sits
+    // in the queue until the parent is idle, and the reply lands in between.
+    // Hand the builder along so the flush can ask the same question again then.
+    const hasOpenQuestion = collectSpawnResults(result.details).some((r) => Boolean(r.awaitingReply));
     sendSubagentStatusPayload(payload, ctx, {
       ...options,
       triggerTurn: config.triggerTurnOnSubagentCompletion,
+      rebuild: hasOpenQuestion ? build : undefined,
     });
   }
 

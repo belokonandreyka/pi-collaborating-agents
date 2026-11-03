@@ -18,6 +18,35 @@ export interface PendingSubagentCompletionUpdate {
   payload: SubagentCompletionMessagePayload;
   targetSessionFile?: string;
   triggerTurn?: boolean;
+  /**
+   * Rebuilds the payload from the facts as they stand at delivery time. A wake
+   * is built when the child parks, but delivered only once the parent is idle;
+   * the parent's reply usually lands in between (2026-10-30: park 11:47:44,
+   * reply 11:47:53, wake delivered 11:47:55, twice in one morning). `null` means
+   * nothing is left to say and the entry is dropped.
+   */
+  rebuild?: () => SubagentCompletionMessagePayload | null;
+}
+
+/**
+ * Re-evaluate queued updates right before delivery: an entry with `rebuild` is
+ * replaced by what its builder says now, or dropped when it says `null`.
+ * Entries without `rebuild` pass through unchanged.
+ */
+export function refreshPendingSubagentCompletionUpdates(
+  pending: PendingSubagentCompletionUpdate[],
+): PendingSubagentCompletionUpdate[] {
+  const refreshed: PendingSubagentCompletionUpdate[] = [];
+  for (const entry of pending) {
+    if (!entry.rebuild) {
+      refreshed.push(entry);
+      continue;
+    }
+    const payload = entry.rebuild();
+    if (!payload) continue;
+    refreshed.push({ ...entry, payload });
+  }
+  return refreshed;
 }
 
 // A failed subagent's `error` can carry arbitrary child stderr or a pane screen
