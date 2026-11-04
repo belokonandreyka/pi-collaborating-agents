@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getDefaultSubagentType } from "./subagent-types.js";
 import { resolveDirs } from "./paths.js";
+import { routeModel } from "./model-route.js";
 import type { SubagentLaunchMode, SubagentTypeConfig } from "./types.js";
 import {
   herdrCallerPaneFromEnv,
@@ -1913,7 +1914,10 @@ export async function runSpawnTask(
   // @mariozechner 0.53-0.73 and @earendil-works 0.74-0.80.9); passing it makes
   // every child exit with "Unknown option" before it starts.
 
-  const model = agentDef.model;
+  // A temporary remap (state/model-route.json, e.g. Copilot → gateway for the
+  // rest of a day that went over its credit budget) wins over the type's model.
+  const routed = routeModel(agentDef.model, agentDef.reasoning);
+  const model = routed.model;
   const modelSpec = model ? parseTypeModelSpec(model) : undefined;
   if (modelSpec) {
     // A type-config `model` is a single override, not a Ctrl+P cycling scope,
@@ -1925,8 +1929,8 @@ export async function runSpawnTask(
   }
   // Without this the type's `reasoning` is parsed and displayed but every
   // child runs at its profile's defaultThinkingLevel.
-  if (agentDef.reasoning) {
-    commonArgs.push("--thinking", agentDef.reasoning);
+  if (routed.reasoning) {
+    commonArgs.push("--thinking", routed.reasoning);
   }
 
   const requestedTools = [...new Set((agentDef.tools ?? []).map((tool) => tool.trim()).filter(Boolean))];
@@ -2027,6 +2031,9 @@ export async function runSpawnTask(
     coordinator: options.parentAgentName,
   };
   if (modelSpec?.warning) pushSpawnWarning(result, modelSpec.warning);
+  if (routed.routedFrom) {
+    pushSpawnWarning(result, `model routed ${routed.routedFrom} → ${model}${routed.reason ? ` (${routed.reason})` : ""}`);
+  }
   const sessionMetadata = createSessionMetadataNotifier(result, options.onSessionMetadata);
 
   if (launchDelayMs > 0) {
