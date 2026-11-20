@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [model-fallback-chain]
+    branches: [main]
   pull_request:
-    branches: [model-fallback-chain]
+    branches: [main]
 
 permissions:
   contents: read
