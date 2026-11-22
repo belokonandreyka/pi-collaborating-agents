@@ -243,9 +243,7 @@ For a fully quiet handoff, also set `subagentLaunchDisplay` to `"hidden"` (which
 
 Spawned workers use a subagent prompt based on their configured `type` (defaulting to a built-in prompt if no type is specified). At minimum they should:
 
-1. At startup call:
-   - `agent_message({ action: "status" })`
-   - `agent_message({ action: "list" })`
+1. Read the startup snapshot at the top of the task (own name, active agents). It stands in for `agent_message` `status` and `list`; do not call them at startup.
 2. Send direct updates to coordinator only when useful:
    - startup acknowledgement
    - blockers/questions needing input

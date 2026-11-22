@@ -1245,9 +1245,9 @@ describe("subagent spawn", () => {
     expect(toolsFlagIndex).toBeGreaterThanOrEqual(0);
     expect(capturedArgs[toolsFlagIndex + 1]).toBe("agent_message");
 
-    const expectedPrompt = "Parent agent: RapidRiver\n\nWrite docs";
-    expect(capturedArgs[capturedArgs.length - 1]).toBe(expectedPrompt);
-    expect(result.launchPrompt).toBe(expectedPrompt);
+    const expectedPrompt = /^Parent agent: RapidRiver\n\nStartup snapshot \(taken at spawn; it stands in for agent_message status and list, do not call them at startup\): you are \S+ \(subagent\), focus local, no reservations\. Active agents: .+\.\n\nWrite docs$/;
+    expect(capturedArgs[capturedArgs.length - 1]).toMatch(expectedPrompt);
+    expect(result.launchPrompt).toMatch(expectedPrompt);
     expect(result.coordinator).toBe("RapidRiver");
 
     expect(result.launchSystemPromptSource).toBeUndefined();
@@ -3356,5 +3356,19 @@ describe("a child silent inside a long tool call", () => {
     });
     expect(settled.terminalAssistantText).toBe("Batch done: 1913 passed.");
     expect(asked).toBe(0);
+  });
+});
+
+describe("startup snapshot", () => {
+  test("names the child, lists the other agents and caps the list", async () => {
+    const { buildStartupSnapshot } = await import("./subagent-spawn.ts");
+    expect(buildStartupSnapshot("worker-ab12-Fox", [])).toBe(
+      "Startup snapshot (taken at spawn; it stands in for agent_message status and list, do not call them at startup): you are worker-ab12-Fox (subagent), focus local, no reservations. Active agents: none registered.",
+    );
+    const peers = [{ name: "worker-ab12-Fox" }, { name: "RapidRiver", role: "coordinator", model: "openai/gpt-6.1-sol" }, ...Array.from({ length: 14 }, (_, i) => ({ name: `w${i}` }))];
+    const text = buildStartupSnapshot("worker-ab12-Fox", peers);
+    expect(text).toContain("Active agents: RapidRiver (coordinator, openai/gpt-6.1-sol); w0;");
+    expect(text).toContain("; +3 more.");
+    expect(text).not.toContain("worker-ab12-Fox;");
   });
 });

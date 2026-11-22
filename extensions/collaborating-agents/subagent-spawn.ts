@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getDefaultSubagentType } from "./subagent-types.js";
 import { resolveDirs } from "./paths.js";
+import { listActiveAgents } from "./store.js";
 import { routeModel } from "./model-route.js";
 import type { SubagentLaunchMode, SubagentTypeConfig } from "./types.js";
 import {
@@ -683,6 +684,40 @@ function extractToolCallNames(content: unknown): string[] {
 // a child that finished: both end a turn and stop touching the session file. The
 // only thing that tells them apart is the call itself, so pull the question text
 // out of an `agent_message` send addressed at the parent.
+export interface SnapshotPeer {
+  name: string;
+  role?: string;
+  model?: string;
+}
+
+const SNAPSHOT_MAX_PEERS = 12;
+
+/**
+ * What `agent_message status` and `list` would tell a freshly started child,
+ * written into its first message so it does not spend two requests asking.
+ */
+export function buildStartupSnapshot(childName: string, peers: SnapshotPeer[]): string {
+  const others = peers.filter((p) => p.name !== childName);
+  const shown = others.slice(0, SNAPSHOT_MAX_PEERS).map((p) => {
+    const extra = [p.role, p.model].filter(Boolean).join(", ");
+    return extra ? `${p.name} (${extra})` : p.name;
+  });
+  const more = others.length > shown.length ? `; +${others.length - shown.length} more` : "";
+  const agents = shown.length > 0 ? `${shown.join("; ")}${more}` : "none registered";
+  return (
+    `Startup snapshot (taken at spawn; it stands in for agent_message status and list, do not call them at startup): ` +
+    `you are ${childName} (subagent), focus local, no reservations. Active agents: ${agents}.`
+  );
+}
+
+function listPeersForSnapshot(): SnapshotPeer[] {
+  try {
+    return listActiveAgents(resolveDirs()).map((p) => ({ name: p.name, role: p.role, model: p.model }));
+  } catch {
+    return [];
+  }
+}
+
 function extractParentQuestion(content: unknown, parentAgentName?: string): string | null {
   if (!Array.isArray(content)) return null;
   for (const block of content) {
@@ -1960,8 +1995,11 @@ export async function runSpawnTask(
     commonArgs.push("--append-system-prompt", typeSystemPrompt);
   }
 
+  // The snapshot stands in for the two startup calls every type prompt used to
+  // ask for (agent_message status + list): each was a full request of its own,
+  // ~10k such requests in four weeks of one profile.
   const parentContextHeader = options.parentAgentName
-    ? `Parent agent: ${options.parentAgentName}\n\n`
+    ? `Parent agent: ${options.parentAgentName}\n\n${buildStartupSnapshot(childName, listPeersForSnapshot())}\n\n`
     : "";
 
   // Keep the task prompt payload user-controlled (type instructions come from TOML
