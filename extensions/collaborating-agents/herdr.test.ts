@@ -4,6 +4,7 @@ import {
   herdrCallerPaneFromEnv,
   isInsideHerdrPane,
   parseHerdrAck,
+  parseHerdrAgentStatus,
   parseHerdrEnvelope,
   parseHerdrPane,
 } from "./herdr.ts";
@@ -139,6 +140,19 @@ describe("herdr pane parsing", () => {
   test("deriveHerdrWorkspaceId tolerates an id without a separator", () => {
     expect(deriveHerdrWorkspaceId("w1:p2")).toBe("w1");
     expect(deriveHerdrWorkspaceId("solo")).toBe("solo");
+  });
+});
+
+describe("herdr agent status", () => {
+  test("reads agent_status from a pane get result", () => {
+    expect(parseHerdrAgentStatus({ pane: { pane_id: "w7:p1ZC", agent: "pi", agent_status: "working" } })).toBe("working");
+    expect(parseHerdrAgentStatus({ pane: { pane_id: "w7:p1ZC", agent_status: "done" } })).toBe("done");
+  });
+
+  test("gives no status for a pane without one or a value it does not know", () => {
+    expect(parseHerdrAgentStatus({ pane: { pane_id: "w1:p2" } })).toBeUndefined();
+    expect(parseHerdrAgentStatus({ pane: { pane_id: "w1:p2", agent_status: "napping" } })).toBeUndefined();
+    expect(parseHerdrAgentStatus({})).toBeUndefined();
   });
 });
 

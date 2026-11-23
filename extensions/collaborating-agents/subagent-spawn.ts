@@ -15,6 +15,7 @@ import {
   herdrClosePane,
   herdrFocusNeighbor,
   herdrListPanes,
+  herdrPaneAgentStatus,
   herdrReadPane,
   herdrRedockPane,
   herdrSendLine,
@@ -22,6 +23,7 @@ import {
   herdrTabLayout,
   type HerdrPaneRect,
 } from "./herdr.js";
+import type { HerdrAgentStatus } from "./herdr.js";
 
 export interface SpawnAgentDefinition {
   name: string;
@@ -1309,6 +1311,11 @@ export async function waitForSettledSessionResult(args: {
    * three Karma/Vitest runs failed this way).
    */
   isAlive?: () => Promise<boolean>;
+  /**
+   * Longest transcript silence tolerated while `isAlive` keeps renewing the budget.
+   * 0 removes the cap; unset falls back to a multiple of timeoutMs.
+   */
+  maxSilenceMs?: number;
 }): Promise<{
   sessionId?: string;
   terminalAssistantText?: string;
@@ -1323,11 +1330,24 @@ export async function waitForSettledSessionResult(args: {
   // cap. Long-running research subagents can legitimately stay busy for well
   // over 10 minutes; as long as the session file keeps changing, keep waiting.
   const inactivityTimeoutMs = Math.max(idleGraceMs, Math.floor(args.timeoutMs));
-  const hardTimeoutMs = Math.max(
-    inactivityTimeoutMs,
-    inactivityTimeoutMs * PANE_MAX_IDLE_TIMEOUT_MULTIPLIER,
-    inactivityTimeoutMs + PANE_MAX_IDLE_TIMEOUT_BUFFER_MS,
-  );
+  // The hard cap bounds silence, not run length: it is counted from the last
+  // transcript change. A live pane renews the inactivity budget while it is
+  // mid-turn, and this cap stops that renewal for a child that is alive but hung.
+  // Counted from the start instead, it failed every run at exactly 6 x 10 min
+  // while the child was still working (2026-11-12: three runs lost at 60:00).
+  const maxSilenceMs =
+    args.maxSilenceMs === 0
+      ? Number.POSITIVE_INFINITY
+      : Math.max(
+          inactivityTimeoutMs,
+          Math.floor(
+            args.maxSilenceMs ??
+              Math.max(
+                inactivityTimeoutMs * PANE_MAX_IDLE_TIMEOUT_MULTIPLIER,
+                inactivityTimeoutMs + PANE_MAX_IDLE_TIMEOUT_BUFFER_MS,
+              ),
+          ),
+        );
   const startedAt = Date.now();
   let activityDeadlineAt = startedAt + inactivityTimeoutMs;
   let lastObservedToken = readFileChangeToken(args.sessionFile);
@@ -1339,7 +1359,7 @@ export async function waitForSettledSessionResult(args: {
   let pendingQuestion: string | undefined;
   let lastReportedToolCount = 0;
 
-  while (Date.now() - startedAt < hardTimeoutMs) {
+  while (Date.now() - lastActivityAt < maxSilenceMs) {
     if (Date.now() >= activityDeadlineAt) {
       const midTurn =
         terminalAssistantText === undefined &&
@@ -1705,6 +1725,26 @@ async function herdrPaneExists(paneRef: string | undefined): Promise<boolean> {
   return listed.ok && listed.value.some((pane) => pane.paneId === paneRef);
 }
 
+/**
+ * Whether herdr's agent status says a quiet child is still busy. `working` is a
+ * turn in progress and `blocked` is a child waiting on a human; `idle` and `done`
+ * mean pi is no longer in a turn, so silence there is not work. `unknown` or no
+ * status (a child without herdr's pi integration) says nothing either way.
+ */
+export function paneAliveFromAgentStatus(status: HerdrAgentStatus | undefined): boolean | undefined {
+  if (status === "working" || status === "blocked") return true;
+  if (status === "idle" || status === "done") return false;
+  return undefined;
+}
+
+/** Liveness of a pane child: herdr's agent status, or the bare pane when it has none. */
+async function isPaneSubagentAlive(paneRef: string | undefined): Promise<boolean> {
+  if (!paneRef) return false;
+  const status = await herdrPaneAgentStatus(paneRef);
+  const verdict = status.ok ? paneAliveFromAgentStatus(status.value) : undefined;
+  return verdict ?? (await herdrPaneExists(paneRef));
+}
+
 async function readSubagentPaneScreen(
   refs: { paneRef?: string; surfaceRef?: string },
   lines: number,
@@ -1735,6 +1775,7 @@ function collectPaneSubagentOutcome(args: {
   sessionFile: string;
   exitMarkerPath: string;
   timeoutMs?: number;
+  maxSilenceMs?: number;
   parentAgentName?: string;
   minUserMessages?: number;
   closePaneOnFinish?: boolean;
@@ -1746,8 +1787,9 @@ function collectPaneSubagentOutcome(args: {
       sessionFile: args.sessionFile,
       exitMarkerPath: args.exitMarkerPath,
       timeoutMs: args.timeoutMs ?? PANE_RESULT_TIMEOUT_MS,
+      maxSilenceMs: args.maxSilenceMs,
       parentAgentName: args.parentAgentName,
-      isAlive: () => herdrPaneExists(args.paneRef),
+      isAlive: () => isPaneSubagentAlive(args.paneRef),
       minUserMessages: args.minUserMessages,
       onUpdate: (state) => {
         if (state.progress) args.onProgress?.(state.progress);
@@ -1793,6 +1835,7 @@ export function adoptPaneSubagent(args: {
   parentAgentName?: string;
   closePaneOnFinish?: boolean;
   timeoutMs?: number;
+  maxSilenceMs?: number;
   onProgress?: (progress: SubagentProgress) => void;
 }): { ok: true; outcome: Promise<ReplyOutcome> } | { ok: false; error: string } {
   if (args.launchMode !== "herdr-pane") return { ok: false, error: `adopting a ${args.launchMode} subagent is not supported` };
@@ -1804,6 +1847,7 @@ export function adoptPaneSubagent(args: {
       sessionFile: args.sessionFile,
       exitMarkerPath: createSubagentExitMarkerPath(args.sessionFile),
       timeoutMs: args.timeoutMs,
+      maxSilenceMs: args.maxSilenceMs,
       parentAgentName: args.parentAgentName,
       closePaneOnFinish: args.closePaneOnFinish,
       closePaneRef: args.paneRef,
@@ -1819,6 +1863,8 @@ export interface ReplyToSubagentArgs {
   sessionFile: string;
   message: string;
   timeoutMs?: number;
+  /** Longest transcript silence tolerated from the resumed child; see `subagentMaxSilenceMs`. */
+  maxSilenceMs?: number;
   parentAgentName?: string;
   /** Close the child's pane once the resumed turn ends on a real result. */
   closePaneOnFinish?: boolean;
@@ -1895,6 +1941,7 @@ export function watchAnsweredSubagent(
     sessionFile: args.sessionFile,
     exitMarkerPath: createSubagentExitMarkerPath(args.sessionFile),
     timeoutMs: args.timeoutMs,
+    maxSilenceMs: args.maxSilenceMs,
     parentAgentName: args.parentAgentName,
     minUserMessages: args.minUserMessages,
     closePaneOnFinish: args.closePaneOnFinish,
@@ -1935,6 +1982,8 @@ export async function runSpawnTask(
     /** herdr-pane mode only: split the current tab (default) or open a new tab. */
     panePlacement?: "split" | "tab";
     paneResultTimeoutMs?: number;
+    /** Longest transcript silence tolerated from a pane child; see `subagentMaxSilenceMs`. */
+    paneMaxSilenceMs?: number;
     onLaunch?: (launch: SpawnResult) => void | Promise<void>;
     onSessionMetadata?: SpawnSessionMetadataCallback;
     onProgress?: SubagentProgressCallback;
@@ -2187,8 +2236,9 @@ export async function runSpawnTask(
       sessionFile: result.sessionFile!,
       exitMarkerPath: exitMarkerPath!,
       timeoutMs: paneResultTimeoutMs,
+      maxSilenceMs: options.paneMaxSilenceMs,
       parentAgentName: options.parentAgentName,
-      isAlive: () => herdrPaneExists(result.paneRef ?? result.surfaceRef),
+      isAlive: () => isPaneSubagentAlive(result.paneRef ?? result.surfaceRef),
       onUpdate: (state) => {
         if (state.sessionId) {
           result.sessionId = state.sessionId;

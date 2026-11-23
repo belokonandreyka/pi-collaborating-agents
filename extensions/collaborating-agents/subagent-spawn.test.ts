@@ -19,6 +19,7 @@ import {
   watchAnsweredSubagent,
   countSessionUserMessages,
   runSpawnTask,
+  paneAliveFromAgentStatus,
   waitForSettledSessionResult,
 } from "./subagent-spawn.ts";
 
@@ -735,6 +736,82 @@ describe("a child parked on a question", () => {
 
     expect(result.awaitingReply).toBeUndefined();
     expect(result.terminalAssistantText).toBe("Done.");
+  });
+
+  test("a child that keeps writing outlives the silence cap", async () => {
+    const tempDir = makeTempDir("collab-long-active");
+    const working = sessionLine({ stopReason: "toolUse", toolName: "bash", toolArgs: { command: "true" } });
+    const sessionFile = writeSession(tempDir, [working]);
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+      fs.appendFileSync(sessionFile, (ticks < 12 ? working : sessionLine({ text: "Done." })) + "\n", "utf-8");
+      if (ticks >= 12) clearInterval(timer);
+    }, 100);
+
+    const result = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 300,
+      maxSilenceMs: 500,
+      idleGraceMs: 100,
+      isAlive: async () => true,
+    });
+    clearInterval(timer);
+
+    expect(result.timedOut).toBe(false);
+    expect(result.terminalAssistantText).toBe("Done.");
+  });
+
+  test("herdr's agent status decides whether a quiet child is still busy", () => {
+    expect(paneAliveFromAgentStatus("working")).toBe(true);
+    expect(paneAliveFromAgentStatus("blocked")).toBe(true);
+    expect(paneAliveFromAgentStatus("idle")).toBe(false);
+    expect(paneAliveFromAgentStatus("done")).toBe(false);
+    // No verdict: the caller falls back to whether the pane exists.
+    expect(paneAliveFromAgentStatus("unknown")).toBeUndefined();
+    expect(paneAliveFromAgentStatus(undefined)).toBeUndefined();
+  });
+
+  test("a silence cap of 0 never fails a child that is still reported busy", async () => {
+    const tempDir = makeTempDir("collab-no-cap");
+    const sessionFile = writeSession(tempDir, [
+      sessionLine({ stopReason: "toolUse", toolName: "bash", toolArgs: { command: "sleep 9999" } }),
+    ]);
+    setTimeout(() => fs.appendFileSync(sessionFile, sessionLine({ text: "Done." }) + "\n", "utf-8"), 1200);
+
+    const result = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 200,
+      maxSilenceMs: 0,
+      idleGraceMs: 100,
+      isAlive: async () => true,
+    });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.terminalAssistantText).toBe("Done.");
+  });
+
+  test("a live but silent child still times out at the silence cap", async () => {
+    const tempDir = makeTempDir("collab-long-silent");
+    const sessionFile = writeSession(tempDir, [
+      sessionLine({ stopReason: "toolUse", toolName: "bash", toolArgs: { command: "sleep 9999" } }),
+    ]);
+    const startedAt = Date.now();
+
+    const result = await waitForSettledSessionResult({
+      sessionFile,
+      exitMarkerPath: path.join(tempDir, "missing.exit"),
+      timeoutMs: 200,
+      maxSilenceMs: 600,
+      idleGraceMs: 100,
+      isAlive: async () => true,
+    });
+
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(600);
+    expect(Date.now() - startedAt).toBeLessThan(3000);
   });
 
   test("an exited child is settled normally, because its session cannot be resumed", async () => {
@@ -3372,3 +3449,4 @@ describe("startup snapshot", () => {
     expect(text).not.toContain("worker-ab12-Fox;");
   });
 });
+

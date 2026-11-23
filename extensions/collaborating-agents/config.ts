@@ -22,6 +22,9 @@ const DEFAULT_CONFIG: CollaboratingAgentsConfig = {
   // Enough for an independent review plus a couple of workers; a cap still exists so
   // a looping orchestrator cannot fan out without bound.
   maxConcurrentSubagentBatches: 4,
+  // One hour: long enough for a slow test run or build inside one tool call, short
+  // enough that a child hung in a turn does not hold its batch slot all day.
+  subagentMaxSilenceMs: 3_600_000,
   subagentCompletionDisplay: "full",
   triggerTurnOnSubagentCompletion: false,
   subagentLaunchDisplay: "full",
@@ -130,6 +133,12 @@ export function loadConfig(cwd: string): CollaboratingAgentsConfig {
       merged.maxConcurrentSubagentBatches >= 0
         ? merged.maxConcurrentSubagentBatches
         : DEFAULT_CONFIG.maxConcurrentSubagentBatches,
+    subagentMaxSilenceMs:
+      typeof merged.subagentMaxSilenceMs === "number" &&
+      Number.isFinite(merged.subagentMaxSilenceMs) &&
+      merged.subagentMaxSilenceMs >= 0
+        ? merged.subagentMaxSilenceMs
+        : DEFAULT_CONFIG.subagentMaxSilenceMs,
     subagentCompletionDisplay: isSubagentCompletionDisplay(merged.subagentCompletionDisplay)
       ? merged.subagentCompletionDisplay
       : DEFAULT_CONFIG.subagentCompletionDisplay,

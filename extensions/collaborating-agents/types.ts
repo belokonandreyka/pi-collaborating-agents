@@ -178,6 +178,11 @@ export interface CollaboratingAgentsConfig {
   subagentProgressIntervalMs: number;
   /** How many subagent batches may run at once (a resumed reply counts as one). 0 removes the cap. */
   maxConcurrentSubagentBatches: number;
+  /**
+   * herdr-pane mode: how long a child that herdr still reports as busy may write
+   * nothing to its transcript before the run is failed. 0 removes the cap.
+   */
+  subagentMaxSilenceMs: number;
   subagentCompletionDisplay: SubagentCompletionDisplay;
   triggerTurnOnSubagentCompletion: boolean;
   subagentLaunchDisplay: SubagentLaunchDisplay;

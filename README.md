@@ -440,6 +440,12 @@ How many subagent batches may be in flight at once. Each `subagent` call is one 
 
 Batches are independent: an orchestrator can keep a long review running and still spawn a worker for the next instruction. Each batch posts its own completion, and run records stay separate. The cap only exists so a looping orchestrator cannot fan out without bound; when it is hit the tool returns `blocked: "already_running"` with the current count instead of launching.
 
+#### `subagentMaxSilenceMs` (number, default: `3600000`)
+
+How long a pane child may write nothing to its session file before its run is failed, in milliseconds. After 10 quiet minutes the orchestrator asks herdr for the pane's agent status: `working` or `blocked` keeps the wait going, `idle` or `done` ends it (a pane with no status counts as busy while it exists). This cap bounds that waiting, so a child hung inside a turn is eventually given up on. The clock restarts on every transcript write, so it limits silence, not run length. Set to `0` to remove the cap.
+
+This setting affects the `"herdr-pane"` launch mode only.
+
 #### `subagentLaunchDisplay` (`"full" | "compact" | "hidden"`, default: `"full"`)
 
 Controls the custom launch message posted after each child starts.

@@ -1702,6 +1702,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         agentDir: config.subagentAgentDir,
         closeCompletedPane: config.closeCompletedPanes,
         closeFailedPane: config.closeFailedPanes,
+        paneMaxSilenceMs: config.subagentMaxSilenceMs,
         preserveOrchestratorPane: config.preserveOrchestratorPane,
         panePlacement: resolveSubagentPanePlacement(
           config.subagentPanePlacement,
@@ -1802,6 +1803,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         agentDir: config.subagentAgentDir,
         closeCompletedPane: config.closeCompletedPanes,
         closeFailedPane: config.closeFailedPanes,
+        paneMaxSilenceMs: config.subagentMaxSilenceMs,
         preserveOrchestratorPane: config.preserveOrchestratorPane,
         panePlacement: resolveSubagentPanePlacement(
           config.subagentPanePlacement,
@@ -2708,6 +2710,7 @@ export default function collaboratingAgentsExtension(pi: ExtensionAPI): void {
         sessionFile: record.sessionFile,
         parentAgentName: state.agentName,
         closePaneOnFinish: config.closeCompletedPanes,
+          maxSilenceMs: config.subagentMaxSilenceMs,
       });
       if (!adopted.ok) continue;
       collectResumedSubagentRun({ ...record, parentPid: process.pid }, adopted.outcome, ctx, "adopt");
@@ -2886,6 +2889,7 @@ Subagent run selectors for session/tail: child run id/recordId, display name, ca
             parentAgentName: state.agentName,
             minUserMessages: userMessagesBefore + 1,
             closePaneOnFinish: config.closeCompletedPanes,
+          maxSilenceMs: config.subagentMaxSilenceMs,
             onProgress: createSubagentProgressReporter(
               () => parked.displayName ?? parked.name ?? parked.recordId,
               config.subagentProgressIntervalMs,
@@ -3060,6 +3064,7 @@ Subagent run selectors for session/tail: child run id/recordId, display name, ca
           message: answer,
           parentAgentName: state.agentName,
           closePaneOnFinish: config.closeCompletedPanes,
+          maxSilenceMs: config.subagentMaxSilenceMs,
           onProgress: createSubagentProgressReporter(
             () => record.displayName ?? record.name ?? record.recordId,
             config.subagentProgressIntervalMs,

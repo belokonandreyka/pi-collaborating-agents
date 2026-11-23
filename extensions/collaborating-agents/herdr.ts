@@ -222,6 +222,28 @@ export async function herdrListPanes(workspaceId?: string): Promise<HerdrResult<
   return { ok: true, value: panes };
 }
 
+export type HerdrAgentStatus = "working" | "blocked" | "idle" | "done" | "unknown";
+
+/** `agent_status` of a `pane get` result; undefined when herdr sent none it knows. */
+export function parseHerdrAgentStatus(result: Record<string, unknown>): HerdrAgentStatus | undefined {
+  const pane = result.pane;
+  if (!pane || typeof pane !== "object" || Array.isArray(pane)) return undefined;
+  const status = (pane as Record<string, unknown>).agent_status;
+  return status === "working" || status === "blocked" || status === "idle" || status === "done" || status === "unknown"
+    ? status
+    : undefined;
+}
+
+/**
+ * What herdr knows about the agent in a pane. For pi the status comes from pi's
+ * own lifecycle hooks (herdr's pi integration), not from reading the screen.
+ */
+export async function herdrPaneAgentStatus(paneId: string): Promise<HerdrResult<HerdrAgentStatus | undefined>> {
+  const envelope = parseHerdrEnvelope(await runHerdrCommand(["pane", "get", paneId]));
+  if (!envelope.ok) return envelope;
+  return { ok: true, value: parseHerdrAgentStatus(envelope.value) };
+}
+
 export async function herdrSplitPane(args: {
   paneId: string;
   direction: HerdrSplitDirection;
